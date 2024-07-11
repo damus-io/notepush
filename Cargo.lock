@@ -394,24 +394,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "damus-push-notification-relay"
-version = "0.1.0"
-dependencies = [
- "a2",
- "chrono",
- "env_logger",
- "log",
- "nostr",
- "rusqlite",
- "serde",
- "serde_json",
- "tokio",
- "toml",
- "tracing",
- "tungstenite",
-]
-
-[[package]]
 name = "data-encoding"
 version = "2.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -959,6 +941,24 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+]
+
+[[package]]
+name = "notepush"
+version = "0.1.0"
+dependencies = [
+ "a2",
+ "chrono",
+ "env_logger",
+ "log",
+ "nostr",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tokio",
+ "toml",
+ "tracing",
+ "tungstenite",
 ]
 
 [[package]]

@@ -1,6 +1,6 @@
 
-# Damus Push notification relay
+# notepush
 
-A high performance Nostr relay for sending out push notifications
+A high performance nostr relay for sending push notifications
 
 ⚠️🔥WIP! Experimental!⚠️🔥
