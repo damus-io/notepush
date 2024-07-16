@@ -1,42 +1,59 @@
-use std::io::Read;
 use std::net::TcpListener;
-use std::sync::{Arc, Mutex};
-use std::thread;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 mod notification_manager;
 use log;
 use env_logger;
-
+use r2d2_sqlite::SqliteConnectionManager;
 mod relay_connection;
 use relay_connection::RelayConnection;
+use r2d2;
+mod notepush_env;
+use notepush_env::NotePushEnv;
 
-
-fn main () {
+#[tokio::main]
+async fn main () {
+    
+    // MARK: - Setup basics
+    
     env_logger::init();
     
-    let host = std::env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
-    let port = std::env::var("PORT").unwrap_or_else(|_| "9001".to_string());
-    let address = format!("{}:{}", host, port);
-    let server = TcpListener::bind(&address).unwrap();
+    let env = NotePushEnv::load_env().expect("Failed to load environment variables");
+    let server = TcpListener::bind(&env.address()).expect("Failed to bind to address");
     
-    let notification_manager = Arc::new(Mutex::new(notification_manager::NotificationManager::new(None, None).unwrap()));
+    let manager = SqliteConnectionManager::file(env.db_path.clone());
+    let pool: r2d2::Pool<SqliteConnectionManager> = r2d2::Pool::new(manager).expect("Failed to create SQLite connection pool");
+    // Notification manager is a shared resource that will be used by all connections via a mutex and an atomic reference counter.
+    // This is shared to avoid data races when reading/writing to the sqlite database, and reduce outgoing relay connections.
+    let notification_manager = Arc::new(Mutex::new(notification_manager::NotificationManager::new(
+        pool,
+        env.relay_url.clone(),
+        env.apns_private_key_path.clone(), 
+        env.apns_private_key_id.clone(),
+        env.apns_team_id.clone(),
+        env.apns_environment.clone(),
+        env.apns_topic.clone(),
+    ).await.expect("Failed to create notification manager")));
     
-    log::info!("Server listening on {}", address);
+    log::info!("Server listening on {}", env.address().clone());
+    
+    // MARK: - Start handling incoming connections
     
     for stream in server.incoming() {
         if let Ok(stream) = stream {
-            log::info!("New connection: {:?}", stream.peer_addr().map_or("unknown".to_string(), |addr| addr.to_string()));
-        } else if let Err(e) = stream {
-            log::error!("Error: {:?}", e);
-        }
-        thread::spawn (move || {
+            let peer_address_string = stream.peer_addr().map_or("unknown".to_string(), |addr| addr.to_string());
+            log::info!("New connection from {}", peer_address_string);
             let notification_manager = notification_manager.clone();
-            let websocket_connection = RelayConnection::new(stream, notification_manager);
-            match websocket_connection.start() {
-                Ok(_) => {}
-                Err(e) => {
-                    log::error!("Error in websocket connection: {:?}", e);
+            tokio::spawn(async move {
+                match RelayConnection::run(stream, notification_manager).await {
+                    Ok(_) => {}
+                    Err(e) => {
+                        log::error!("Error with websocket connection from {}: {:?}", peer_address_string, e);
+                    }
                 }
-            }
-        });
+            });
+        } else if let Err(e) = stream {
+            log::error!("Error in incoming connection stream: {:?}", e);
+        }
     }
 }

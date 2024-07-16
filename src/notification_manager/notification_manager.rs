@@ -5,53 +5,45 @@ use nostr::types::Timestamp;
 use rusqlite;
 use rusqlite::params;
 use std::collections::HashSet;
-use std::env;
+
 use std::fs::File;
 use super::mute_manager::MuteManager;
 use nostr::Event;
 use super::SqlStringConvertible;
 use super::ExtendedEvent;
-
-// MARK: - Constants
-
-const DEFAULT_DB_PATH: &str = "./apns_notifications.db";
-const DEFAULT_RELAY_URL: &str = "ws://localhost:7777";
+use r2d2_sqlite::SqliteConnectionManager;
+use r2d2;
 
 // MARK: - NotificationManager
 
 pub struct NotificationManager {
-    db_path: String,
+    db: r2d2::Pool<SqliteConnectionManager>,
     relay_url: String,
     apns_private_key_path: String,
     apns_private_key_id: String,
     apns_team_id: String,
-    
-    db: rusqlite::Connection,
+    apns_environment: a2::client::Endpoint,
+    apns_topic: String,
+
     mute_manager: MuteManager,
 }
 
 impl NotificationManager {
-
     // MARK: - Initialization
-
-    pub fn new(db_path: Option<String>, relay_url: Option<String>) -> Result<Self, Box<dyn std::error::Error>> {
-        let db_path = db_path.unwrap_or(env::var("DB_PATH").unwrap_or(DEFAULT_DB_PATH.to_string()));
-        let relay_url = relay_url.unwrap_or(env::var("RELAY_URL").unwrap_or(DEFAULT_RELAY_URL.to_string()));
-        let apns_private_key_path = env::var("APNS_PRIVATE_KEY_PATH")?;
-        let apns_private_key_id = env::var("APNS_PRIVATE_KEY_ID")?;
-        let apns_team_id = env::var("APNS_TEAM_ID")?;
+    
+    pub async fn new(db: r2d2::Pool<SqliteConnectionManager>, relay_url: String, apns_private_key_path: String, apns_private_key_id: String, apns_team_id: String, apns_environment: a2::client::Endpoint, apns_topic: String) -> Result<Self, Box<dyn std::error::Error>> {
+        let mute_manager = MuteManager::new(relay_url.clone()).await?;
         
-        let db = rusqlite::Connection::open(&db_path)?;
-        let mute_manager = MuteManager::new(relay_url.clone());
-        
-        Self::setup_database(&db)?;
+        let connection = db.get()?;
+        Self::setup_database(&connection)?;
 
         Ok(Self {
-            db_path,
             relay_url,
             apns_private_key_path,
             apns_private_key_id,
             apns_team_id,
+            apns_environment,
+            apns_topic,
             db,
             mute_manager,
         })
@@ -117,11 +109,11 @@ impl NotificationManager {
             return Ok(());
         }
 
-        let pubkeys_to_notify = self.pubkeys_to_notify_for_event(event)?;
+        let pubkeys_to_notify = self.pubkeys_to_notify_for_event(event).await?;
 
         for pubkey in pubkeys_to_notify {
             self.send_event_notifications_to_pubkey(event, &pubkey).await?;
-            self.db.execute(
+            self.db.get()?.execute(
                 "INSERT OR REPLACE INTO notifications (id, event_id, pubkey, received_notification, sent_at)
                 VALUES (?, ?, ?, ?, ?)",
                 params![
@@ -136,7 +128,7 @@ impl NotificationManager {
         Ok(())
     }
 
-    fn pubkeys_to_notify_for_event(&self, event: &Event) -> Result<HashSet<nostr::PublicKey>, Box<dyn std::error::Error>> {
+    async fn pubkeys_to_notify_for_event(&self, event: &Event) -> Result<HashSet<nostr::PublicKey>, Box<dyn std::error::Error>> {
         let notification_status = self.get_notification_status(event)?;
         let relevant_pubkeys = self.pubkeys_relevant_to_event(event)?;
         let pubkeys_that_received_notification = notification_status.pubkeys_that_received_notification();
@@ -148,7 +140,8 @@ impl NotificationManager {
 
         let mut pubkeys_to_notify = HashSet::new();
         for pubkey in relevant_pubkeys_yet_to_receive {
-            if !self.mute_manager.should_mute_notification_for_pubkey(event, &pubkey)? {
+            let should_mute: bool = self.mute_manager.should_mute_notification_for_pubkey(event, &pubkey).await;
+            if !should_mute {
                 pubkeys_to_notify.insert(pubkey);
             }
         }
@@ -170,7 +163,8 @@ impl NotificationManager {
     }
 
     fn pubkeys_subscribed_to_event_id(&self, event_id: &EventId) -> Result<HashSet<PublicKey>, Box<dyn std::error::Error>> {
-        let mut stmt = self.db.prepare("SELECT pubkey FROM notifications WHERE event_id = ?")?;
+        let connection = self.db.get()?;
+        let mut stmt = connection.prepare("SELECT pubkey FROM notifications WHERE event_id = ?")?;
         let pubkeys = stmt.query_map([event_id.to_sql_string()], |row| row.get(0))?
             .filter_map(|r| r.ok())
             .filter_map(|r: String| PublicKey::from_sql_string(r).ok())
@@ -187,7 +181,8 @@ impl NotificationManager {
     }
 
     fn get_user_device_tokens(&self, pubkey: &PublicKey) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-        let mut stmt = self.db.prepare("SELECT device_token FROM user_info WHERE pubkey = ?")?;
+        let connection = self.db.get()?;
+        let mut stmt = connection.prepare("SELECT device_token FROM user_info WHERE pubkey = ?")?;
         let device_tokens = stmt.query_map([pubkey.to_sql_string()], |row| row.get(0))?
             .filter_map(|r| r.ok())
             .collect();
@@ -195,7 +190,8 @@ impl NotificationManager {
     }
 
     fn get_notification_status(&self, event: &Event) -> Result<NotificationStatus, Box<dyn std::error::Error>> {
-        let mut stmt = self.db.prepare("SELECT pubkey, received_notification FROM notifications WHERE event_id = ?")?;
+        let connection = self.db.get()?;
+        let mut stmt = connection.prepare("SELECT pubkey, received_notification FROM notifications WHERE event_id = ?")?;
         let rows: std::collections::HashMap<PublicKey, bool> = stmt.query_map([event.id.to_sql_string()], |row| {
             Ok((row.get(0)?, row.get(1)?))
         })?
@@ -231,6 +227,7 @@ impl NotificationManager {
             Default::default()
         );
         payload.add_custom_data("nostr_event", event);
+        payload.options.apns_topic = Some(self.apns_topic.as_str());
         
         let mut file = File::open(&self.apns_private_key_path)?;
         
@@ -238,7 +235,8 @@ impl NotificationManager {
             &mut file,
             &self.apns_private_key_id,
             &self.apns_team_id,
-            ClientConfig::default())?;
+            ClientConfig::new(self.apns_environment.clone())
+        )?;
         
         let _response = client.send(payload).await?;
         Ok(())
@@ -253,7 +251,7 @@ impl NotificationManager {
 
     pub fn save_user_device_info(&self, pubkey: &str, device_token: &str) -> Result<(), Box<dyn std::error::Error>> {
         let current_time_unix = Timestamp::now();
-        self.db.execute(
+        self.db.get()?.execute(
             "INSERT OR REPLACE INTO user_info (id, pubkey, device_token, added_at) VALUES (?, ?, ?, ?)",
             params![
                 format!("{}:{}", pubkey, device_token), 
@@ -266,7 +264,7 @@ impl NotificationManager {
     }
 
     pub fn remove_user_device_info(&self, pubkey: &str, device_token: &str) -> Result<(), Box<dyn std::error::Error>> {
-        self.db.execute(
+        self.db.get()?.execute(
             "DELETE FROM user_info WHERE pubkey = ? AND device_token = ?",
             params![pubkey, device_token],
         )?;
@@ -285,13 +283,5 @@ impl NotificationStatus {
             .filter(|&(_, &received_notification)| received_notification)
             .map(|(pubkey, _)| pubkey.clone())
             .collect()
-    }
-}
-
-impl Drop for NotificationManager {
-    fn drop(&mut self) {
-        if let Err(e) = self.db.close() {
-            eprintln!("Error closing database: {:?}", e);
-        }
     }
 }
