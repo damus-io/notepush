@@ -805,6 +805,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0fcc0b4a115bf80b728eb8ea024ad5bd707b615bfed49e0665b6e0f86fd082d9"
 
 [[package]]
+name = "httpdate"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
+
+[[package]]
 name = "humantime"
 version = "2.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -823,6 +829,7 @@ dependencies = [
  "http",
  "http-body",
  "httparse",
+ "httpdate",
  "itoa",
  "pin-project-lite",
  "smallvec",
@@ -1180,9 +1187,13 @@ name = "notepush"
 version = "0.1.0"
 dependencies = [
  "a2",
+ "base64 0.22.1",
  "chrono",
  "dotenv",
  "env_logger",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "log",
  "nostr",
  "nostr-sdk",
@@ -1191,10 +1202,12 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "thiserror",
  "tokio",
  "toml",
  "tracing",
  "tungstenite",
+ "uuid",
 ]
 
 [[package]]

@@ -17,10 +17,12 @@ APNS_AUTH_PRIVATE_KEY_ID=1234567890 # The ID of the private key used to generate
 APNS_ENVIRONMENT="development"    # The environment to use with the APNS server. Can be "development" or "production"
 APPLE_TEAM_ID=1248163264        # The ID of the team. Can be found in AppStore Connect.
 DB_PATH=./apns_notifications.db         # Path to the SQLite database file that will be used to store data about sent notifications, relative to the working directory
-RELAY_URL=ws://localhost:7777           # URL to the relay server which will be consulted to get information such as mute lists.
+RELAY_URL=wss://relay.damus.io           # URL to the relay server which will be consulted to get information such as mute lists.
+RELAY_HOST="0.0.0.0"                          # The host to bind the server to (Defaults to 0.0.0.0 to bind to all interfaces)
+RELAY_PORT=9001                               # The port to bind the server to. Defaults to 9001
+API_HOST="0.0.0.0"                            # The host to bind the API server to (Defaults to 0.0.0.0 to bind to all interfaces)
+API_PORT=8000                                 # The port to bind the API server to. Defaults to 8000
 API_BASE_URL=http://localhost:8000      # Base URL from the API is allowed access (used by the server to perform NIP-98 authentication)
-HOST="0.0.0.0"                          # The host to bind the server to (Defaults to 0.0.0.0 to bind to all interfaces)
-PORT=9001                               # The port to bind the server to. Defaults to 9001
 ```
 
 6. Run this relay using the built binary or the `cargo run` command. If you want to change the log level, you can set the `RUST_LOG` environment variable to `DEBUG` or `INFO` before running the relay.

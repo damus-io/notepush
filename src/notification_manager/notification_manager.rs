@@ -249,13 +249,13 @@ impl NotificationManager {
         (title, subtitle, body)
     }
 
-    pub fn save_user_device_info(&self, pubkey: &str, device_token: &str) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn save_user_device_info(&self, pubkey: nostr::PublicKey, device_token: &str) -> Result<(), Box<dyn std::error::Error>> {
         let current_time_unix = Timestamp::now();
         self.db.get()?.execute(
             "INSERT OR REPLACE INTO user_info (id, pubkey, device_token, added_at) VALUES (?, ?, ?, ?)",
             params![
-                format!("{}:{}", pubkey, device_token), 
-                pubkey,
+                format!("{}:{}", pubkey.to_sql_string(), device_token), 
+                pubkey.to_sql_string(),
                 device_token,
                 current_time_unix.to_sql_string()
             ],
@@ -263,10 +263,10 @@ impl NotificationManager {
         Ok(())
     }
 
-    pub fn remove_user_device_info(&self, pubkey: &str, device_token: &str) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn remove_user_device_info(&self, pubkey: nostr::PublicKey, device_token: &str) -> Result<(), Box<dyn std::error::Error>> {
         self.db.get()?.execute(
             "DELETE FROM user_info WHERE pubkey = ? AND device_token = ?",
-            params![pubkey, device_token],
+            params![pubkey.to_sql_string(), device_token],
         )?;
         Ok(())
     }

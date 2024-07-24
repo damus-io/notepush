@@ -1,5 +1,7 @@
+#![forbid(unsafe_code)]
 use std::net::TcpListener;
 use std::sync::Arc;
+use api_server::api_server::APIServer;
 use tokio::sync::Mutex;
 mod notification_manager;
 use log;
@@ -10,6 +12,7 @@ use relay_connection::RelayConnection;
 use r2d2;
 mod notepush_env;
 use notepush_env::NotePushEnv;
+mod api_server;
 
 #[tokio::main]
 async fn main () {
@@ -19,7 +22,7 @@ async fn main () {
     env_logger::init();
     
     let env = NotePushEnv::load_env().expect("Failed to load environment variables");
-    let server = TcpListener::bind(&env.address()).expect("Failed to bind to address");
+    let server = TcpListener::bind(&env.relay_address()).expect("Failed to bind to address");
     
     let manager = SqliteConnectionManager::file(env.db_path.clone());
     let pool: r2d2::Pool<SqliteConnectionManager> = r2d2::Pool::new(manager).expect("Failed to create SQLite connection pool");
@@ -35,9 +38,20 @@ async fn main () {
         env.apns_topic.clone(),
     ).await.expect("Failed to create notification manager")));
     
-    log::info!("Server listening on {}", env.address().clone());
+    // MARK: - Start the API server
+    {
+        let notification_manager = notification_manager.clone();
+        let api_host = env.api_host.clone();
+        let api_port = env.api_port.clone();
+        let api_base_url = env.api_base_url.clone();
+        tokio::spawn(async move {
+            APIServer::run(api_host, api_port, notification_manager, api_base_url).await.expect("Failed to start API server");
+        });
+    }
     
     // MARK: - Start handling incoming connections
+    
+    log::info!("Relay server listening on {}", env.relay_address().clone());
     
     for stream in server.incoming() {
         if let Ok(stream) = stream {
