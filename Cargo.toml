@@ -22,6 +22,7 @@ chrono = { version = "0.4.38" }
 a2 = { version = "0.10.0" }
 tokio = { version = "1.38.0", features = ["full"] }
 tungstenite = "0.23.0"
+hyper = "1.4.1"
 nostr = "0.32.1"
 log = "0.4"
 env_logger = "0.11.3"
@@ -29,3 +30,4 @@ nostr-sdk = "0.32.0"
 r2d2_sqlite = "0.24.0"
 r2d2 = "0.8.10"
 dotenv = "0.15.0"
+base64 = "0.22.1"

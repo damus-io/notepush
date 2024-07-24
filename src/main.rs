@@ -10,6 +10,8 @@ use relay_connection::RelayConnection;
 use r2d2;
 mod notepush_env;
 use notepush_env::NotePushEnv;
+mod api_server;
+use api_server::APIServer;
 
 #[tokio::main]
 async fn main () {
@@ -19,7 +21,7 @@ async fn main () {
     env_logger::init();
     
     let env = NotePushEnv::load_env().expect("Failed to load environment variables");
-    let server = TcpListener::bind(&env.address()).expect("Failed to bind to address");
+    let server = TcpListener::bind(&env.relay_address()).expect("Failed to bind to address");
     
     let manager = SqliteConnectionManager::file(env.db_path.clone());
     let pool: r2d2::Pool<SqliteConnectionManager> = r2d2::Pool::new(manager).expect("Failed to create SQLite connection pool");
@@ -35,9 +37,13 @@ async fn main () {
         env.apns_topic.clone(),
     ).await.expect("Failed to create notification manager")));
     
-    log::info!("Server listening on {}", env.address().clone());
+    // MARK: - Start the API server
+    
+    let api_server = APIServer::new(env.api_host.clone(), env.api_port.clone(), notification_manager.clone(), env.api_base_url.clone());
     
     // MARK: - Start handling incoming connections
+    
+    log::info!("Relay server listening on {}", env.relay_address().clone());
     
     for stream in server.incoming() {
         if let Ok(stream) = stream {

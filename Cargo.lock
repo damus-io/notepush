@@ -1180,9 +1180,11 @@ name = "notepush"
 version = "0.1.0"
 dependencies = [
  "a2",
+ "base64 0.22.1",
  "chrono",
  "dotenv",
  "env_logger",
+ "hyper",
  "log",
  "nostr",
  "nostr-sdk",
