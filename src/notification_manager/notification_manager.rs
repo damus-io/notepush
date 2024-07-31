@@ -5,6 +5,7 @@ use nostr::types::Timestamp;
 use rusqlite;
 use rusqlite::params;
 use std::collections::HashSet;
+use log;
 
 use std::fs::File;
 use super::mute_manager::MuteManager;
@@ -18,12 +19,12 @@ use r2d2;
 
 pub struct NotificationManager {
     db: r2d2::Pool<SqliteConnectionManager>,
-    relay_url: String,
     apns_private_key_path: String,
     apns_private_key_id: String,
     apns_team_id: String,
     apns_environment: a2::client::Endpoint,
     apns_topic: String,
+    apns_client: Client,
 
     mute_manager: MuteManager,
 }
@@ -36,14 +37,23 @@ impl NotificationManager {
         
         let connection = db.get()?;
         Self::setup_database(&connection)?;
+        
+        let mut file = File::open(&apns_private_key_path)?;
+        
+        let client = Client::token(
+            &mut file,
+            &apns_private_key_id,
+            &apns_team_id,
+            ClientConfig::new(apns_environment.clone())
+        )?;
 
         Ok(Self {
-            relay_url,
             apns_private_key_path,
             apns_private_key_id,
             apns_team_id,
             apns_environment,
             apns_topic,
+            apns_client: client,
             db,
             mute_manager,
         })
@@ -104,12 +114,15 @@ impl NotificationManager {
     // MARK: - Business logic
 
     pub async fn send_notifications_if_needed(&self, event: &Event) -> Result<(), Box<dyn std::error::Error>> {
+        log::debug!("Checking if notifications need to be sent for event: {}", event.id);
         let one_week_ago = nostr::Timestamp::now() - 7 * 24 * 60 * 60;
         if event.created_at < one_week_ago {
             return Ok(());
         }
 
         let pubkeys_to_notify = self.pubkeys_to_notify_for_event(event).await?;
+        
+        log::debug!("Sending notifications to {} pubkeys", pubkeys_to_notify.len());
 
         for pubkey in pubkeys_to_notify {
             self.send_event_notifications_to_pubkey(event, &pubkey).await?;
@@ -214,6 +227,8 @@ impl NotificationManager {
 
     async fn send_event_notification_to_device_token(&self, event: &Event, device_token: &str) -> Result<(), Box<dyn std::error::Error>> {
         let (title, subtitle, body) = self.format_notification_message(event);
+        
+        log::debug!("Sending notification to device token: {}", device_token);
 
         let builder = DefaultNotificationBuilder::new()
             .set_title(&title)
@@ -226,19 +241,13 @@ impl NotificationManager {
             device_token,
             Default::default()
         );
-        payload.add_custom_data("nostr_event", event);
+        let _ = payload.add_custom_data("nostr_event", event);
         payload.options.apns_topic = Some(self.apns_topic.as_str());
         
-        let mut file = File::open(&self.apns_private_key_path)?;
+        let _response = self.apns_client.send(payload).await?;
         
-        let client = Client::token(
-            &mut file,
-            &self.apns_private_key_id,
-            &self.apns_team_id,
-            ClientConfig::new(self.apns_environment.clone())
-        )?;
+        log::info!("Notification sent to device token: {}", device_token);
         
-        let _response = client.send(payload).await?;
         Ok(())
     }
 
