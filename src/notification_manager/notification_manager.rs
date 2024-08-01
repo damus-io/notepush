@@ -1,19 +1,19 @@
 use a2::{Client, ClientConfig, DefaultNotificationBuilder, NotificationBuilder};
+use log;
 use nostr::event::EventId;
 use nostr::key::PublicKey;
 use nostr::types::Timestamp;
 use rusqlite;
 use rusqlite::params;
 use std::collections::HashSet;
-use log;
 
-use std::fs::File;
 use super::mute_manager::MuteManager;
-use nostr::Event;
-use super::SqlStringConvertible;
 use super::ExtendedEvent;
-use r2d2_sqlite::SqliteConnectionManager;
+use super::SqlStringConvertible;
+use nostr::Event;
 use r2d2;
+use r2d2_sqlite::SqliteConnectionManager;
+use std::fs::File;
 
 // MARK: - NotificationManager
 
@@ -31,20 +31,28 @@ pub struct NotificationManager {
 
 impl NotificationManager {
     // MARK: - Initialization
-    
-    pub async fn new(db: r2d2::Pool<SqliteConnectionManager>, relay_url: String, apns_private_key_path: String, apns_private_key_id: String, apns_team_id: String, apns_environment: a2::client::Endpoint, apns_topic: String) -> Result<Self, Box<dyn std::error::Error>> {
+
+    pub async fn new(
+        db: r2d2::Pool<SqliteConnectionManager>,
+        relay_url: String,
+        apns_private_key_path: String,
+        apns_private_key_id: String,
+        apns_team_id: String,
+        apns_environment: a2::client::Endpoint,
+        apns_topic: String,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let mute_manager = MuteManager::new(relay_url.clone()).await?;
-        
+
         let connection = db.get()?;
         Self::setup_database(&connection)?;
-        
+
         let mut file = File::open(&apns_private_key_path)?;
-        
+
         let client = Client::token(
             &mut file,
             &apns_private_key_id,
             &apns_team_id,
-            ClientConfig::new(apns_environment.clone())
+            ClientConfig::new(apns_environment.clone()),
         )?;
 
         Ok(Self {
@@ -58,7 +66,7 @@ impl NotificationManager {
             mute_manager,
         })
     }
-    
+
     // MARK: - Database setup operations
 
     pub fn setup_database(db: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
@@ -93,39 +101,58 @@ impl NotificationManager {
 
         Self::add_column_if_not_exists(&db, "notifications", "sent_at", "INTEGER")?;
         Self::add_column_if_not_exists(&db, "user_info", "added_at", "INTEGER")?;
-        
+
         Ok(())
     }
 
-    fn add_column_if_not_exists(db: &rusqlite::Connection, table_name: &str, column_name: &str, column_type: &str) -> Result<(), rusqlite::Error> {
+    fn add_column_if_not_exists(
+        db: &rusqlite::Connection,
+        table_name: &str,
+        column_name: &str,
+        column_type: &str,
+    ) -> Result<(), rusqlite::Error> {
         let query = format!("PRAGMA table_info({})", table_name);
         let mut stmt = db.prepare(&query)?;
-        let column_names: Vec<String> = stmt.query_map([], |row| row.get(1))?
+        let column_names: Vec<String> = stmt
+            .query_map([], |row| row.get(1))?
             .filter_map(|r| r.ok())
             .collect();
 
         if !column_names.contains(&column_name.to_string()) {
-            let query = format!("ALTER TABLE {} ADD COLUMN {} {}", table_name, column_name, column_type);
+            let query = format!(
+                "ALTER TABLE {} ADD COLUMN {} {}",
+                table_name, column_name, column_type
+            );
             db.execute(&query, [])?;
         }
         Ok(())
     }
-    
+
     // MARK: - Business logic
 
-    pub async fn send_notifications_if_needed(&self, event: &Event) -> Result<(), Box<dyn std::error::Error>> {
-        log::debug!("Checking if notifications need to be sent for event: {}", event.id);
+    pub async fn send_notifications_if_needed(
+        &self,
+        event: &Event,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        log::debug!(
+            "Checking if notifications need to be sent for event: {}",
+            event.id
+        );
         let one_week_ago = nostr::Timestamp::now() - 7 * 24 * 60 * 60;
         if event.created_at < one_week_ago {
             return Ok(());
         }
 
         let pubkeys_to_notify = self.pubkeys_to_notify_for_event(event).await?;
-        
-        log::debug!("Sending notifications to {} pubkeys", pubkeys_to_notify.len());
+
+        log::debug!(
+            "Sending notifications to {} pubkeys",
+            pubkeys_to_notify.len()
+        );
 
         for pubkey in pubkeys_to_notify {
-            self.send_event_notifications_to_pubkey(event, &pubkey).await?;
+            self.send_event_notifications_to_pubkey(event, &pubkey)
+                .await?;
             self.db.get()?.execute(
                 "INSERT OR REPLACE INTO notifications (id, event_id, pubkey, received_notification, sent_at)
                 VALUES (?, ?, ?, ?, ?)",
@@ -141,10 +168,14 @@ impl NotificationManager {
         Ok(())
     }
 
-    async fn pubkeys_to_notify_for_event(&self, event: &Event) -> Result<HashSet<nostr::PublicKey>, Box<dyn std::error::Error>> {
+    async fn pubkeys_to_notify_for_event(
+        &self,
+        event: &Event,
+    ) -> Result<HashSet<nostr::PublicKey>, Box<dyn std::error::Error>> {
         let notification_status = self.get_notification_status(event)?;
         let relevant_pubkeys = self.pubkeys_relevant_to_event(event)?;
-        let pubkeys_that_received_notification = notification_status.pubkeys_that_received_notification();
+        let pubkeys_that_received_notification =
+            notification_status.pubkeys_that_received_notification();
         let relevant_pubkeys_yet_to_receive: HashSet<PublicKey> = relevant_pubkeys
             .difference(&pubkeys_that_received_notification)
             .filter(|&x| *x != event.pubkey)
@@ -153,7 +184,10 @@ impl NotificationManager {
 
         let mut pubkeys_to_notify = HashSet::new();
         for pubkey in relevant_pubkeys_yet_to_receive {
-            let should_mute: bool = self.mute_manager.should_mute_notification_for_pubkey(event, &pubkey).await;
+            let should_mute: bool = self
+                .mute_manager
+                .should_mute_notification_for_pubkey(event, &pubkey)
+                .await;
             if !should_mute {
                 pubkeys_to_notify.insert(pubkey);
             }
@@ -161,53 +195,79 @@ impl NotificationManager {
         Ok(pubkeys_to_notify)
     }
 
-    fn pubkeys_relevant_to_event(&self, event: &Event) -> Result<HashSet<PublicKey>, Box<dyn std::error::Error>> {
+    fn pubkeys_relevant_to_event(
+        &self,
+        event: &Event,
+    ) -> Result<HashSet<PublicKey>, Box<dyn std::error::Error>> {
         let mut relevant_pubkeys = event.relevant_pubkeys();
         let referenced_event_ids = event.referenced_event_ids();
         for referenced_event_id in referenced_event_ids {
-            let pubkeys_relevant_to_referenced_event = self.pubkeys_subscribed_to_event_id(&referenced_event_id)?;
+            let pubkeys_relevant_to_referenced_event =
+                self.pubkeys_subscribed_to_event_id(&referenced_event_id)?;
             relevant_pubkeys.extend(pubkeys_relevant_to_referenced_event);
         }
         Ok(relevant_pubkeys)
     }
 
-    fn pubkeys_subscribed_to_event(&self, event: &Event) -> Result<HashSet<PublicKey>, Box<dyn std::error::Error>> {
+    fn pubkeys_subscribed_to_event(
+        &self,
+        event: &Event,
+    ) -> Result<HashSet<PublicKey>, Box<dyn std::error::Error>> {
         self.pubkeys_subscribed_to_event_id(&event.id)
     }
 
-    fn pubkeys_subscribed_to_event_id(&self, event_id: &EventId) -> Result<HashSet<PublicKey>, Box<dyn std::error::Error>> {
+    fn pubkeys_subscribed_to_event_id(
+        &self,
+        event_id: &EventId,
+    ) -> Result<HashSet<PublicKey>, Box<dyn std::error::Error>> {
         let connection = self.db.get()?;
         let mut stmt = connection.prepare("SELECT pubkey FROM notifications WHERE event_id = ?")?;
-        let pubkeys = stmt.query_map([event_id.to_sql_string()], |row| row.get(0))?
+        let pubkeys = stmt
+            .query_map([event_id.to_sql_string()], |row| row.get(0))?
             .filter_map(|r| r.ok())
             .filter_map(|r: String| PublicKey::from_sql_string(r).ok())
             .collect();
         Ok(pubkeys)
     }
 
-    async fn send_event_notifications_to_pubkey(&self, event: &Event, pubkey: &PublicKey) -> Result<(), Box<dyn std::error::Error>> {
+    async fn send_event_notifications_to_pubkey(
+        &self,
+        event: &Event,
+        pubkey: &PublicKey,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let user_device_tokens = self.get_user_device_tokens(pubkey)?;
         for device_token in user_device_tokens {
-            self.send_event_notification_to_device_token(event, &device_token).await?;
+            self.send_event_notification_to_device_token(event, &device_token)
+                .await?;
         }
         Ok(())
     }
 
-    fn get_user_device_tokens(&self, pubkey: &PublicKey) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    fn get_user_device_tokens(
+        &self,
+        pubkey: &PublicKey,
+    ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
         let connection = self.db.get()?;
         let mut stmt = connection.prepare("SELECT device_token FROM user_info WHERE pubkey = ?")?;
-        let device_tokens = stmt.query_map([pubkey.to_sql_string()], |row| row.get(0))?
+        let device_tokens = stmt
+            .query_map([pubkey.to_sql_string()], |row| row.get(0))?
             .filter_map(|r| r.ok())
             .collect();
         Ok(device_tokens)
     }
 
-    fn get_notification_status(&self, event: &Event) -> Result<NotificationStatus, Box<dyn std::error::Error>> {
+    fn get_notification_status(
+        &self,
+        event: &Event,
+    ) -> Result<NotificationStatus, Box<dyn std::error::Error>> {
         let connection = self.db.get()?;
-        let mut stmt = connection.prepare("SELECT pubkey, received_notification FROM notifications WHERE event_id = ?")?;
-        let rows: std::collections::HashMap<PublicKey, bool> = stmt.query_map([event.id.to_sql_string()], |row| {
-            Ok((row.get(0)?, row.get(1)?))
-        })?
+        let mut stmt = connection.prepare(
+            "SELECT pubkey, received_notification FROM notifications WHERE event_id = ?",
+        )?;
+        let rows: std::collections::HashMap<PublicKey, bool> = stmt
+            .query_map([event.id.to_sql_string()], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })?
             .filter_map(|r: Result<(String, bool), rusqlite::Error>| r.ok())
             .filter_map(|r: (String, bool)| {
                 let pubkey = PublicKey::from_sql_string(r.0).ok()?;
@@ -225,9 +285,13 @@ impl NotificationManager {
         Ok(NotificationStatus { status_info })
     }
 
-    async fn send_event_notification_to_device_token(&self, event: &Event, device_token: &str) -> Result<(), Box<dyn std::error::Error>> {
+    async fn send_event_notification_to_device_token(
+        &self,
+        event: &Event,
+        device_token: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let (title, subtitle, body) = self.format_notification_message(event);
-        
+
         log::debug!("Sending notification to device token: {}", device_token);
 
         let builder = DefaultNotificationBuilder::new()
@@ -236,18 +300,15 @@ impl NotificationManager {
             .set_body(&body)
             .set_mutable_content()
             .set_content_available();
-        
-        let mut payload = builder.build(
-            device_token,
-            Default::default()
-        );
+
+        let mut payload = builder.build(device_token, Default::default());
         let _ = payload.add_custom_data("nostr_event", event);
         payload.options.apns_topic = Some(self.apns_topic.as_str());
-        
+
         let _response = self.apns_client.send(payload).await?;
-        
+
         log::info!("Notification sent to device token: {}", device_token);
-        
+
         Ok(())
     }
 
@@ -258,7 +319,11 @@ impl NotificationManager {
         (title, subtitle, body)
     }
 
-    pub fn save_user_device_info(&self, pubkey: nostr::PublicKey, device_token: &str) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn save_user_device_info(
+        &self,
+        pubkey: nostr::PublicKey,
+        device_token: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let current_time_unix = Timestamp::now();
         self.db.get()?.execute(
             "INSERT OR REPLACE INTO user_info (id, pubkey, device_token, added_at) VALUES (?, ?, ?, ?)",
@@ -272,7 +337,11 @@ impl NotificationManager {
         Ok(())
     }
 
-    pub fn remove_user_device_info(&self, pubkey: nostr::PublicKey, device_token: &str) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn remove_user_device_info(
+        &self,
+        pubkey: nostr::PublicKey,
+        device_token: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         self.db.get()?.execute(
             "DELETE FROM user_info WHERE pubkey = ? AND device_token = ?",
             params![pubkey.to_sql_string(), device_token],

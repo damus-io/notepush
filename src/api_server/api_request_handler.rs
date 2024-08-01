@@ -1,18 +1,18 @@
 use super::nip98_auth;
-use hyper::{Request, Response, StatusCode};
 use hyper::body::Buf;
 use hyper::body::Incoming;
+use hyper::{Request, Response, StatusCode};
 
 use http_body_util::BodyExt;
 use nostr;
 
-use thiserror::Error;
-use std::sync::Arc;
-use log;
-use hyper::Method;
-use tokio::sync::Mutex;
-use serde_json::{json, Value};
 use crate::notification_manager::NotificationManager;
+use hyper::Method;
+use log;
+use serde_json::{json, Value};
+use std::sync::Arc;
+use thiserror::Error;
+use tokio::sync::Mutex;
 
 struct ParsedRequest {
     uri: String,
@@ -57,31 +57,33 @@ impl APIHandler {
             base_url,
         }
     }
-    
-    pub async fn handle_http_request(&self, req: Request<Incoming>) -> Result<Response<String>, hyper::http::Error> {
+
+    pub async fn handle_http_request(
+        &self,
+        req: Request<Incoming>,
+    ) -> Result<Response<String>, hyper::http::Error> {
         let final_api_response: APIResponse = match self.try_to_handle_http_request(req).await {
-            Ok(api_response) => {
-                APIResponse {
-                    status: api_response.status,
-                    body: api_response.body,
-                }
+            Ok(api_response) => APIResponse {
+                status: api_response.status,
+                body: api_response.body,
             },
             Err(err) => {
                 // Detect if error is a APIError::AuthenticationError and return a 401 status code
                 if let Some(api_error) = err.downcast_ref::<APIError>() {
                     match api_error {
-                        APIError::AuthenticationError(message) => {
-                            APIResponse {
-                                status: StatusCode::UNAUTHORIZED,
-                                body: json!({ "error": "Unauthorized", "message": message }),
-                            }
+                        APIError::AuthenticationError(message) => APIResponse {
+                            status: StatusCode::UNAUTHORIZED,
+                            body: json!({ "error": "Unauthorized", "message": message }),
                         },
                     }
-                }
-                else {
+                } else {
                     // Otherwise, return a 500 status code
                     let random_case_uuid = uuid::Uuid::new_v4();
-                    log::error!("Error handling request: {} (Case ID: {})", err, random_case_uuid);
+                    log::error!(
+                        "Error handling request: {} (Case ID: {})",
+                        err,
+                        random_case_uuid
+                    );
                     APIResponse {
                         status: StatusCode::INTERNAL_SERVER_ERROR,
                         body: json!({ "error": "Internal server error", "message": format!("Case ID: {}", random_case_uuid) }),
@@ -93,33 +95,46 @@ impl APIHandler {
             .header("Content-Type", "application/json")
             .header("Access-Control-Allow-Origin", "*")
             .status(final_api_response.status)
-            .body(final_api_response.body.to_string())?
-        )
+            .body(final_api_response.body.to_string())?)
     }
-    
-    async fn try_to_handle_http_request(&self, mut req: Request<Incoming>) -> Result<APIResponse, Box<dyn std::error::Error>> {        
-        let parsed_request = self.parse_http_request(&mut req).await?;   
-        let api_response: APIResponse = self.handle_parsed_http_request(&parsed_request).await?;     
-        log::info!("[{}] {} (Authorized pubkey: {}): {}", req.method(), req.uri(), parsed_request.authorized_pubkey, api_response.status);
+
+    async fn try_to_handle_http_request(
+        &self,
+        mut req: Request<Incoming>,
+    ) -> Result<APIResponse, Box<dyn std::error::Error>> {
+        let parsed_request = self.parse_http_request(&mut req).await?;
+        let api_response: APIResponse = self.handle_parsed_http_request(&parsed_request).await?;
+        log::info!(
+            "[{}] {} (Authorized pubkey: {}): {}",
+            req.method(),
+            req.uri(),
+            parsed_request.authorized_pubkey,
+            api_response.status
+        );
         Ok(api_response)
     }
-    
-    async fn parse_http_request(&self, req: &mut Request<Incoming>) -> Result<ParsedRequest, Box<dyn std::error::Error>> {
+
+    async fn parse_http_request(
+        &self,
+        req: &mut Request<Incoming>,
+    ) -> Result<ParsedRequest, Box<dyn std::error::Error>> {
         // 1. Read the request body
         let body_buffer = req.body_mut().collect().await?.aggregate();
         let body_bytes = body_buffer.chunk();
-        let body_bytes = if body_bytes.is_empty() { None } else { Some(body_bytes) };
-    
+        let body_bytes = if body_bytes.is_empty() {
+            None
+        } else {
+            Some(body_bytes)
+        };
+
         // 2. NIP-98 authentication
         let authorized_pubkey = match self.authenticate(&req, body_bytes).await? {
-            Ok(pubkey) => {
-                pubkey
-            },
+            Ok(pubkey) => pubkey,
             Err(auth_error) => {
                 return Err(Box::new(APIError::AuthenticationError(auth_error)));
             }
         };
-        
+
         // 3. Parse the request
         Ok(ParsedRequest {
             uri: req.uri().path().to_string(),
@@ -128,37 +143,48 @@ impl APIHandler {
             authorized_pubkey,
         })
     }
-    
-    async fn handle_parsed_http_request(&self, parsed_request: &ParsedRequest) -> Result<APIResponse, Box<dyn std::error::Error>> {
+
+    async fn handle_parsed_http_request(
+        &self,
+        parsed_request: &ParsedRequest,
+    ) -> Result<APIResponse, Box<dyn std::error::Error>> {
         match (&parsed_request.method, parsed_request.uri.as_str()) {
             (&Method::POST, "/user-info") => self.handle_user_info(parsed_request).await,
-            (&Method::POST, "/user-info/remove") => self.handle_user_info_remove(parsed_request).await,
-            _ => {
-                Ok(APIResponse {
-                    status: StatusCode::NOT_FOUND,
-                    body: json!({ "error": "Not found" }),
-                })
+            (&Method::POST, "/user-info/remove") => {
+                self.handle_user_info_remove(parsed_request).await
             }
+            _ => Ok(APIResponse {
+                status: StatusCode::NOT_FOUND,
+                body: json!({ "error": "Not found" }),
+            }),
         }
     }
-    
-    async fn authenticate(&self, req: &Request<Incoming>, body_bytes: Option<&[u8]>) -> Result<Result<nostr::PublicKey, String>, Box<dyn std::error::Error>> {
+
+    async fn authenticate(
+        &self,
+        req: &Request<Incoming>,
+        body_bytes: Option<&[u8]>,
+    ) -> Result<Result<nostr::PublicKey, String>, Box<dyn std::error::Error>> {
         let auth_header = match req.headers().get("Authorization") {
             Some(header) => header,
             None => return Ok(Err("Authorization header not found".to_string())),
         };
-    
+
         Ok(nip98_auth::nip98_verify_auth_header(
             auth_header.to_str()?.to_string(),
             &format!("{}{}", self.base_url, req.uri().path()),
             req.method().as_str(),
-            body_bytes
-        ).await)
+            body_bytes,
+        )
+        .await)
     }
-    
-    async fn handle_user_info(&self, req: &ParsedRequest) -> Result<APIResponse, Box<dyn std::error::Error>> {
+
+    async fn handle_user_info(
+        &self,
+        req: &ParsedRequest,
+    ) -> Result<APIResponse, Box<dyn std::error::Error>> {
         let body = req.body_json()?;
-    
+
         if let Some(device_token) = body["deviceToken"].as_str() {
             let notification_manager = self.notification_manager.lock().await;
             notification_manager.save_user_device_info(req.authorized_pubkey, device_token)?;
@@ -173,10 +199,13 @@ impl APIHandler {
             });
         }
     }
-    
-    async fn handle_user_info_remove(&self, req: &ParsedRequest) -> Result<APIResponse, Box<dyn std::error::Error>> {
+
+    async fn handle_user_info_remove(
+        &self,
+        req: &ParsedRequest,
+    ) -> Result<APIResponse, Box<dyn std::error::Error>> {
         let body: Value = req.body_json()?;
-        
+
         if let Some(device_token) = body["deviceToken"].as_str() {
             let notification_manager = self.notification_manager.lock().await;
             notification_manager.remove_user_device_info(req.authorized_pubkey, device_token)?;
@@ -194,8 +223,7 @@ impl APIHandler {
 }
 
 // Define enum error types including authentication error
-#[derive(Debug)]
-#[derive(Error)]
+#[derive(Debug, Error)]
 enum APIError {
     #[error("Authentication error: {0}")]
     AuthenticationError(String),

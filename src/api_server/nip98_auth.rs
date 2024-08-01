@@ -1,16 +1,16 @@
 use base64::prelude::*;
-use serde_json::Value;
+use nostr;
 use nostr::bitcoin::hashes::sha256::Hash as Sha256Hash;
 use nostr::bitcoin::hashes::Hash;
 use nostr::util::hex;
 use nostr::Timestamp;
-use nostr;
+use serde_json::Value;
 
 pub async fn nip98_verify_auth_header(
     auth_header: String,
     url: &str,
     method: &str,
-    body: Option<&[u8]>
+    body: Option<&[u8]>,
 ) -> Result<nostr::PublicKey, String> {
     if auth_header.is_empty() {
         return Err("Nostr authorization header missing".to_string());
@@ -30,23 +30,30 @@ pub async fn nip98_verify_auth_header(
         return Err("Nostr authorization header does not have a base64 encoded note".to_string());
     }
 
-    let decoded_note_json = BASE64_STANDARD.decode(base64_encoded_note.as_bytes())
-        .map_err(|_| format!("Failed to decode base64 encoded note from Nostr authorization header"))?;
-    
+    let decoded_note_json = BASE64_STANDARD
+        .decode(base64_encoded_note.as_bytes())
+        .map_err(|_| {
+            format!("Failed to decode base64 encoded note from Nostr authorization header")
+        })?;
+
     let note_value: Value = serde_json::from_slice(&decoded_note_json)
         .map_err(|_| format!("Could not parse JSON note from authorization header"))?;
-    
+
     let note: nostr::Event = nostr::Event::from_value(note_value)
         .map_err(|_| format!("Could not parse Nostr note from JSON"))?;
 
     if note.kind != nostr::Kind::HttpAuth {
         return Err("Nostr note kind in authorization header is incorrect".to_string());
     }
-    
-    let authorized_url = note.get_tag_content(nostr::TagKind::SingleLetter(nostr::SingleLetterTag::lowercase(nostr::Alphabet::U)))
+
+    let authorized_url = note
+        .get_tag_content(nostr::TagKind::SingleLetter(
+            nostr::SingleLetterTag::lowercase(nostr::Alphabet::U),
+        ))
         .ok_or_else(|| "Missing 'u' tag from Nostr authorization header".to_string())?;
 
-    let authorized_method = note.get_tag_content(nostr::TagKind::Method)
+    let authorized_method = note
+        .get_tag_content(nostr::TagKind::Method)
         .ok_or_else(|| "Missing 'method' tag from Nostr authorization header".to_string())?;
 
     if authorized_url != url || authorized_method != method {
@@ -59,7 +66,9 @@ pub async fn nip98_verify_auth_header(
     let current_time: nostr::Timestamp = nostr::Timestamp::now();
     let note_created_at: nostr::Timestamp = note.created_at();
     let time_delta = TimeDelta::subtracting(current_time, note_created_at);
-    if (time_delta.negative && time_delta.delta_abs_seconds > 30) || (!time_delta.negative && time_delta.delta_abs_seconds > 60) {
+    if (time_delta.negative && time_delta.delta_abs_seconds > 30)
+        || (!time_delta.negative && time_delta.delta_abs_seconds > 60)
+    {
         return Err(format!(
             "Auth note is too old. Current time: {}; Note created at: {}; Time delta: {} seconds",
             current_time, note_created_at, time_delta
@@ -69,13 +78,16 @@ pub async fn nip98_verify_auth_header(
     if let Some(body_data) = body {
         let authorized_content_hash_bytes: Vec<u8> = hex::decode(
             note.get_tag_content(nostr::TagKind::Payload)
-                .ok_or("Missing 'payload' tag from Nostr authorization header")?
+                .ok_or("Missing 'payload' tag from Nostr authorization header")?,
         )
-        .map_err(|_| format!("Failed to decode hex encoded payload from Nostr authorization header"))?;
+        .map_err(|_| {
+            format!("Failed to decode hex encoded payload from Nostr authorization header")
+        })?;
 
-        let authorized_content_hash: Sha256Hash = Sha256Hash::from_slice(&authorized_content_hash_bytes)
-            .map_err(|_| format!("Failed to convert hex encoded payload to Sha256Hash"))?;
-            
+        let authorized_content_hash: Sha256Hash =
+            Sha256Hash::from_slice(&authorized_content_hash_bytes)
+                .map_err(|_| format!("Failed to convert hex encoded payload to Sha256Hash"))?;
+
         let body_hash = Sha256Hash::hash(body_data);
         if authorized_content_hash != body_hash {
             return Err("Auth note payload hash does not match request body hash".to_string());
@@ -91,13 +103,13 @@ pub async fn nip98_verify_auth_header(
     if note.verify().is_err() {
         return Err("Auth note id or signature is invalid".to_string());
     }
-    
+
     Ok(note.pubkey)
 }
 
 struct TimeDelta {
     delta_abs_seconds: u64,
-    negative: bool
+    negative: bool,
 }
 
 impl TimeDelta {
@@ -107,12 +119,12 @@ impl TimeDelta {
         if t1 > t2 {
             TimeDelta {
                 delta_abs_seconds: (t1 - t2).as_u64(),
-                negative: false
+                negative: false,
             }
         } else {
             TimeDelta {
                 delta_abs_seconds: (t2 - t1).as_u64(),
-                negative: true
+                negative: true,
             }
         }
     }

@@ -1,6 +1,6 @@
-use std::env;
-use dotenv::dotenv;
 use a2;
+use dotenv::dotenv;
+use std::env;
 
 const DEFAULT_DB_PATH: &str = "./apns_notifications.db";
 const DEFAULT_RELAY_HOST: &str = "0.0.0.0";
@@ -28,7 +28,7 @@ pub struct NotePushEnv {
     // The host and port to bind the API server to
     pub api_host: String,
     pub api_port: String,
-    pub api_base_url: String,   // The base URL of where the API server is hosted for NIP-98 auth checks
+    pub api_base_url: String, // The base URL of where the API server is hosted for NIP-98 auth checks
     // The URL of the Nostr relay server to connect to for getting mutelists
     pub relay_url: String,
 }
@@ -43,17 +43,19 @@ impl NotePushEnv {
         let relay_host = env::var("RELAY_HOST").unwrap_or(DEFAULT_RELAY_HOST.to_string());
         let relay_port = env::var("RELAY_PORT").unwrap_or(DEFAULT_RELAY_PORT.to_string());
         let relay_url = env::var("RELAY_URL").unwrap_or(DEFAULT_RELAY_URL.to_string());
-        let apns_environment_string = env::var("APNS_ENVIRONMENT").unwrap_or("development".to_string());
+        let apns_environment_string =
+            env::var("APNS_ENVIRONMENT").unwrap_or("development".to_string());
         let api_host = env::var("API_HOST").unwrap_or(DEFAULT_API_HOST.to_string());
         let api_port = env::var("API_PORT").unwrap_or(DEFAULT_API_PORT.to_string());
-        let api_base_url = env::var("API_BASE_URL").unwrap_or(format!("https://{}:{}", api_host, api_port));
+        let api_base_url =
+            env::var("API_BASE_URL").unwrap_or(format!("https://{}:{}", api_host, api_port));
         let apns_environment = match apns_environment_string.as_str() {
             "development" => a2::client::Endpoint::Sandbox,
             "production" => a2::client::Endpoint::Production,
             _ => a2::client::Endpoint::Sandbox,
         };
         let apns_topic = env::var("APNS_TOPIC")?;
-        
+
         Ok(NotePushEnv {
             apns_private_key_path,
             apns_private_key_id,
@@ -69,7 +71,7 @@ impl NotePushEnv {
             relay_url,
         })
     }
-    
+
     pub fn relay_address(&self) -> String {
         format!("{}:{}", self.relay_host, self.relay_port)
     }
