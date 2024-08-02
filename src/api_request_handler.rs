@@ -1,7 +1,11 @@
-use super::nip98_auth;
+use crate::nip98_auth;
+use crate::relay_connection::RelayConnection;
+use http_body_util::Full;
 use hyper::body::Buf;
+use hyper::body::Bytes;
 use hyper::body::Incoming;
 use hyper::{Request, Response, StatusCode};
+use hyper_tungstenite;
 
 use http_body_util::BodyExt;
 use nostr;
@@ -61,7 +65,23 @@ impl APIHandler {
     pub async fn handle_http_request(
         &self,
         req: Request<Incoming>,
-    ) -> Result<Response<String>, hyper::http::Error> {
+    ) -> Result<Response<Full<Bytes>>, hyper::http::Error> {
+        // Check if the request is a websocket upgrade request.
+        if hyper_tungstenite::is_upgrade_request(&req) {
+            return match self.handle_websocket_upgrade(req).await {
+                Ok(response) => Ok(response),
+                Err(err) => {
+                    log::error!("Error handling websocket upgrade request: {}", err);
+                    Ok(Response::builder()
+                        .status(StatusCode::INTERNAL_SERVER_ERROR)
+                        .body(http_body_util::Full::new(Bytes::from(
+                            "Internal server error",
+                        )))?)
+                }
+            };
+        }
+
+        // If not, handle the request as a normal API request.
         let final_api_response: APIResponse = match self.try_to_handle_http_request(req).await {
             Ok(api_response) => APIResponse {
                 status: api_response.status,
@@ -91,11 +111,34 @@ impl APIHandler {
                 }
             }
         };
+
         Ok(Response::builder()
             .header("Content-Type", "application/json")
             .header("Access-Control-Allow-Origin", "*")
             .status(final_api_response.status)
-            .body(final_api_response.body.to_string())?)
+            .body(http_body_util::Full::new(Bytes::from(
+                final_api_response.body.to_string(),
+            )))?)
+    }
+
+    async fn handle_websocket_upgrade(
+        &self,
+        mut req: Request<Incoming>,
+    ) -> Result<Response<Full<Bytes>>, Box<dyn std::error::Error>> {
+        let (response, websocket) = hyper_tungstenite::upgrade(&mut req, None)?;
+        log::info!("New websocket connection.");
+
+        let new_notification_manager = self.notification_manager.clone();
+        tokio::spawn(async move {
+            match RelayConnection::run(websocket, new_notification_manager).await {
+                Ok(_) => {}
+                Err(e) => {
+                    log::error!("Error with websocket connection: {:?}", e);
+                }
+            }
+        });
+
+        Ok(response)
     }
 
     async fn try_to_handle_http_request(

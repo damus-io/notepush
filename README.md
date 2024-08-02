@@ -18,10 +18,8 @@ APNS_ENVIRONMENT="development"    # The environment to use with the APNS server.
 APPLE_TEAM_ID=1248163264        # The ID of the team. Can be found in AppStore Connect.
 DB_PATH=./apns_notifications.db         # Path to the SQLite database file that will be used to store data about sent notifications, relative to the working directory
 RELAY_URL=wss://relay.damus.io           # URL to the relay server which will be consulted to get information such as mute lists.
-RELAY_HOST="0.0.0.0"                          # The host to bind the server to (Defaults to 0.0.0.0 to bind to all interfaces)
-RELAY_PORT=9001                               # The port to bind the server to. Defaults to 9001
-API_HOST="0.0.0.0"                            # The host to bind the API server to (Defaults to 0.0.0.0 to bind to all interfaces)
-API_PORT=8000                                 # The port to bind the API server to. Defaults to 8000
+HOST="0.0.0.0"                          # The host to bind the server to (Defaults to 0.0.0.0 to bind to all interfaces)
+PORT=8000                               # The port to bind the server to. Defaults to 8000
 API_BASE_URL=http://localhost:8000      # Base URL from the API is allowed access (used by the server to perform NIP-98 authentication)
 ```
 
@@ -50,6 +48,6 @@ You can use `test/test-inputs` with a websockets test tool such as `websocat` to
 
 ```sh
 $ nix-shell
-[nix-shell] $ websocat ws://localhost:9001
+[nix-shell] $ websocat ws://localhost:8000
 <ENTER_FULL_JSON_PAYLOAD_HERE_AND_PRESS_ENTER>
 ```

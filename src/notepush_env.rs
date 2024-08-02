@@ -3,11 +3,9 @@ use dotenv::dotenv;
 use std::env;
 
 const DEFAULT_DB_PATH: &str = "./apns_notifications.db";
-const DEFAULT_RELAY_HOST: &str = "0.0.0.0";
-const DEFAULT_RELAY_PORT: &str = "9001";
+const DEFAULT_HOST: &str = "0.0.0.0";
+const DEFAULT_PORT: &str = "8000";
 const DEFAULT_RELAY_URL: &str = "wss://relay.damus.io";
-const DEFAULT_API_HOST: &str = "0.0.0.0";
-const DEFAULT_API_PORT: &str = "8000";
 
 pub struct NotePushEnv {
     // The path to the Apple private key .p8 file
@@ -22,12 +20,9 @@ pub struct NotePushEnv {
     pub apns_topic: String,
     // The path to the SQLite database file
     pub db_path: String,
-    // The host and port to bind the relay server to
-    pub relay_host: String,
-    pub relay_port: String,
-    // The host and port to bind the API server to
-    pub api_host: String,
-    pub api_port: String,
+    // The host and port to bind the relay and API to
+    pub host: String,
+    pub port: String,
     pub api_base_url: String, // The base URL of where the API server is hosted for NIP-98 auth checks
     // The URL of the Nostr relay server to connect to for getting mutelists
     pub relay_url: String,
@@ -40,15 +35,12 @@ impl NotePushEnv {
         let apns_private_key_id = env::var("APNS_AUTH_PRIVATE_KEY_ID")?;
         let apns_team_id = env::var("APPLE_TEAM_ID")?;
         let db_path = env::var("DB_PATH").unwrap_or(DEFAULT_DB_PATH.to_string());
-        let relay_host = env::var("RELAY_HOST").unwrap_or(DEFAULT_RELAY_HOST.to_string());
-        let relay_port = env::var("RELAY_PORT").unwrap_or(DEFAULT_RELAY_PORT.to_string());
+        let host = env::var("HOST").unwrap_or(DEFAULT_HOST.to_string());
+        let port = env::var("PORT").unwrap_or(DEFAULT_PORT.to_string());
         let relay_url = env::var("RELAY_URL").unwrap_or(DEFAULT_RELAY_URL.to_string());
         let apns_environment_string =
             env::var("APNS_ENVIRONMENT").unwrap_or("development".to_string());
-        let api_host = env::var("API_HOST").unwrap_or(DEFAULT_API_HOST.to_string());
-        let api_port = env::var("API_PORT").unwrap_or(DEFAULT_API_PORT.to_string());
-        let api_base_url =
-            env::var("API_BASE_URL").unwrap_or(format!("https://{}:{}", api_host, api_port));
+        let api_base_url = env::var("API_BASE_URL").unwrap_or(format!("https://{}:{}", host, port));
         let apns_environment = match apns_environment_string.as_str() {
             "development" => a2::client::Endpoint::Sandbox,
             "production" => a2::client::Endpoint::Production,
@@ -63,16 +55,14 @@ impl NotePushEnv {
             apns_environment,
             apns_topic,
             db_path,
-            relay_host,
-            relay_port,
-            api_host,
-            api_port,
+            host,
+            port,
             api_base_url,
             relay_url,
         })
     }
 
     pub fn relay_address(&self) -> String {
-        format!("{}:{}", self.relay_host, self.relay_port)
+        format!("{}:{}", self.host, self.port)
     }
 }

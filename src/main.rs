@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
-use api_server::api_server::APIServer;
-use std::net::TcpListener;
+use hyper_util::rt::TokioIo;
 use std::sync::Arc;
+use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 mod notification_manager;
 use env_logger;
@@ -9,19 +9,22 @@ use log;
 use r2d2_sqlite::SqliteConnectionManager;
 mod relay_connection;
 use r2d2;
-use relay_connection::RelayConnection;
 mod notepush_env;
 use notepush_env::NotePushEnv;
-mod api_server;
+mod api_request_handler;
+mod nip98_auth;
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // MARK: - Setup basics
 
     env_logger::init();
 
     let env = NotePushEnv::load_env().expect("Failed to load environment variables");
-    let server = TcpListener::bind(&env.relay_address()).expect("Failed to bind to address");
+    let listener = TcpListener::bind(&env.relay_address())
+        .await
+        .expect("Failed to bind to address");
+    log::info!("Server running at {}", env.relay_address());
 
     let manager = SqliteConnectionManager::file(env.db_path.clone());
     let pool: r2d2::Pool<SqliteConnectionManager> =
@@ -41,45 +44,27 @@ async fn main() {
         .await
         .expect("Failed to create notification manager"),
     ));
+    let api_handler = Arc::new(api_request_handler::APIHandler::new(
+        notification_manager.clone(),
+        env.api_base_url.clone(),
+    ));
 
-    // MARK: - Start the API server
-    {
-        let notification_manager = notification_manager.clone();
-        let api_host = env.api_host.clone();
-        let api_port = env.api_port.clone();
-        let api_base_url = env.api_base_url.clone();
-        tokio::spawn(async move {
-            APIServer::run(api_host, api_port, notification_manager, api_base_url)
-                .await
-                .expect("Failed to start API server");
+    loop {
+        let (stream, _) = listener.accept().await?;
+        let io = TokioIo::new(stream);
+        let api_handler_clone = api_handler.clone();
+        let mut http = hyper::server::conn::http1::Builder::new();
+        http.keep_alive(true);
+
+        tokio::task::spawn(async move {
+            let service =
+                hyper::service::service_fn(|req| api_handler_clone.handle_http_request(req));
+
+            let connection = http.serve_connection(io, service).with_upgrades();
+
+            if let Err(err) = connection.await {
+                log::error!("Failed to serve connection: {:?}", err);
+            }
         });
-    }
-
-    // MARK: - Start handling incoming connections
-
-    log::info!("Relay server listening on {}", env.relay_address().clone());
-
-    for stream in server.incoming() {
-        if let Ok(stream) = stream {
-            let peer_address_string = stream
-                .peer_addr()
-                .map_or("unknown".to_string(), |addr| addr.to_string());
-            log::info!("New connection from {}", peer_address_string);
-            let notification_manager = notification_manager.clone();
-            tokio::spawn(async move {
-                match RelayConnection::run(stream, notification_manager).await {
-                    Ok(_) => {}
-                    Err(e) => {
-                        log::error!(
-                            "Error with websocket connection from {}: {:?}",
-                            peer_address_string,
-                            e
-                        );
-                    }
-                }
-            });
-        } else if let Err(e) = stream {
-            log::error!("Error in incoming connection stream: {:?}", e);
-        }
     }
 }
