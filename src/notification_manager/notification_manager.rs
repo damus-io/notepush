@@ -19,10 +19,6 @@ use std::fs::File;
 
 pub struct NotificationManager {
     db: r2d2::Pool<SqliteConnectionManager>,
-    apns_private_key_path: String,
-    apns_private_key_id: String,
-    apns_team_id: String,
-    apns_environment: a2::client::Endpoint,
     apns_topic: String,
     apns_client: Client,
 
@@ -56,10 +52,6 @@ impl NotificationManager {
         )?;
 
         Ok(Self {
-            apns_private_key_path,
-            apns_private_key_id,
-            apns_team_id,
-            apns_environment,
             apns_topic,
             apns_client: client,
             db,
@@ -207,13 +199,6 @@ impl NotificationManager {
             relevant_pubkeys.extend(pubkeys_relevant_to_referenced_event);
         }
         Ok(relevant_pubkeys)
-    }
-
-    fn pubkeys_subscribed_to_event(
-        &self,
-        event: &Event,
-    ) -> Result<HashSet<PublicKey>, Box<dyn std::error::Error>> {
-        self.pubkeys_subscribed_to_event_id(&event.id)
     }
 
     fn pubkeys_subscribed_to_event_id(

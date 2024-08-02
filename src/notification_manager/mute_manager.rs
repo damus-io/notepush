@@ -2,7 +2,6 @@ use super::ExtendedEvent;
 use nostr_sdk::prelude::*;
 
 pub struct MuteManager {
-    relay_url: String,
     client: Client,
 }
 
@@ -11,7 +10,7 @@ impl MuteManager {
         let client = Client::new(&Keys::generate());
         client.add_relay(relay_url.clone()).await?;
         client.connect().await;
-        Ok(MuteManager { relay_url, client })
+        Ok(MuteManager { client })
     }
 
     pub async fn should_mute_notification_for_pubkey(
