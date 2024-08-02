@@ -18,6 +18,11 @@ impl MuteManager {
         event: &Event,
         pubkey: &PublicKey,
     ) -> bool {
+        log::debug!(
+            "Checking if event {:?} should be muted for pubkey {:?}",
+            event,
+            pubkey
+        );
         if let Some(mute_list) = self.get_public_mute_list(pubkey).await {
             for tag in mute_list.tags() {
                 match tag.kind() {

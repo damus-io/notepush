@@ -132,6 +132,7 @@ impl NotificationManager {
         );
         let one_week_ago = nostr::Timestamp::now() - 7 * 24 * 60 * 60;
         if event.created_at < one_week_ago {
+            log::debug!("Event is older than a week, not sending notifications");
             return Ok(());
         }
 
