@@ -1,5 +1,6 @@
 use super::ExtendedEvent;
 use nostr_sdk::prelude::*;
+use tokio::time::{timeout, Duration};
 
 pub struct MuteManager {
     client: Client,
@@ -99,18 +100,26 @@ impl MuteManager {
 
         let mut mute_list: Option<Event> = None;
         let mut notifications = self.client.notifications();
-        while let Ok(notification) = notifications.recv().await {
-            if let RelayPoolNotification::Event {
-                subscription_id,
-                event,
-                ..
-            } = notification
-            {
-                if this_subscription_id == subscription_id && event.kind == Kind::MuteList {
-                    mute_list = Some((*event).clone());
-                    break;
+
+        let timeout_duration = Duration::from_secs(10);
+        while let Ok(result) = timeout(timeout_duration, notifications.recv()).await {
+            if let Ok(notification) = result {
+                if let RelayPoolNotification::Event {
+                    subscription_id,
+                    event,
+                    ..
+                } = notification
+                {
+                    if this_subscription_id == subscription_id && event.kind == Kind::MuteList {
+                        mute_list = Some((*event).clone());
+                        break;
+                    }
                 }
             }
+        }
+        
+        if mute_list.is_none() {
+            log::debug!("Mute list not found for pubkey {:?}", pubkey);
         }
 
         self.client.unsubscribe(this_subscription_id).await;
