@@ -102,7 +102,8 @@ impl RelayConnection {
     ) -> Result<RelayMessage, Box<dyn std::error::Error>> {
         match message {
             ClientMessage::Event(event) => {
-                log::info!("Received event: {:?}", event);
+                log::info!("Received event with id: {:?}", event.id.to_hex());
+                log::debug!("Event received: {:?}", event);
                 self.notification_manager.send_notifications_if_needed(&event).await?;
                 let notice_message = format!("blocked: This relay does not store events");
                 let response = RelayMessage::Ok {
@@ -113,8 +114,9 @@ impl RelayConnection {
                 Ok(response)
             }
             _ => {
-                log::info!("Received unsupported message: {:?}", message);
-                let notice_message = format!("Unsupported message: {:?}", message);
+                log::info!("Received unsupported Nostr client message");
+                log::debug!("Unsupported Nostr client message: {:?}", message);
+                let notice_message = format!("Unsupported message.");
                 let response = RelayMessage::Notice {
                     message: notice_message,
                 };
