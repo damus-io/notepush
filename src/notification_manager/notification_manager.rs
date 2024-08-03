@@ -5,7 +5,9 @@ use nostr::key::PublicKey;
 use nostr::types::Timestamp;
 use rusqlite;
 use rusqlite::params;
+use tokio::sync::Mutex;
 use std::collections::HashSet;
+use tokio;
 
 use super::mute_manager::MuteManager;
 use super::ExtendedEvent;
@@ -18,11 +20,11 @@ use std::fs::File;
 // MARK: - NotificationManager
 
 pub struct NotificationManager {
-    db: r2d2::Pool<SqliteConnectionManager>,
+    db: Mutex<r2d2::Pool<SqliteConnectionManager>>,
     apns_topic: String,
-    apns_client: Client,
+    apns_client: Mutex<Client>,
 
-    mute_manager: MuteManager,
+    mute_manager: Mutex<MuteManager>,
 }
 
 impl NotificationManager {
@@ -53,9 +55,9 @@ impl NotificationManager {
 
         Ok(Self {
             apns_topic,
-            apns_client: client,
-            db,
-            mute_manager,
+            apns_client: Mutex::new(client),
+            db: Mutex::new(db),
+            mute_manager: Mutex::new(mute_manager),
         })
     }
 
@@ -146,17 +148,20 @@ impl NotificationManager {
         for pubkey in pubkeys_to_notify {
             self.send_event_notifications_to_pubkey(event, &pubkey)
                 .await?;
-            self.db.get()?.execute(
-                "INSERT OR REPLACE INTO notifications (id, event_id, pubkey, received_notification, sent_at)
-                VALUES (?, ?, ?, ?, ?)",
-                params![
-                    format!("{}:{}", event.id, pubkey),
-                    event.id.to_sql_string(),
-                    pubkey.to_sql_string(),
-                    true,
-                    nostr::Timestamp::now().to_sql_string(),
-                ],
-            )?;
+            {
+                let db_mutex_guard = self.db.lock().await;
+                db_mutex_guard.get()?.execute(
+                    "INSERT OR REPLACE INTO notifications (id, event_id, pubkey, received_notification, sent_at)
+                    VALUES (?, ?, ?, ?, ?)",
+                    params![
+                        format!("{}:{}", event.id, pubkey),
+                        event.id.to_sql_string(),
+                        pubkey.to_sql_string(),
+                        true,
+                        nostr::Timestamp::now().to_sql_string(),
+                    ],
+                )?;
+            }
         }
         Ok(())
     }
@@ -165,8 +170,8 @@ impl NotificationManager {
         &self,
         event: &Event,
     ) -> Result<HashSet<nostr::PublicKey>, Box<dyn std::error::Error>> {
-        let notification_status = self.get_notification_status(event)?;
-        let relevant_pubkeys = self.pubkeys_relevant_to_event(event)?;
+        let notification_status = self.get_notification_status(event).await?;
+        let relevant_pubkeys = self.pubkeys_relevant_to_event(event).await?;
         let pubkeys_that_received_notification =
             notification_status.pubkeys_that_received_notification();
         let relevant_pubkeys_yet_to_receive: HashSet<PublicKey> = relevant_pubkeys
@@ -177,10 +182,12 @@ impl NotificationManager {
 
         let mut pubkeys_to_notify = HashSet::new();
         for pubkey in relevant_pubkeys_yet_to_receive {
-            let should_mute: bool = self
-                .mute_manager
-                .should_mute_notification_for_pubkey(event, &pubkey)
-                .await;
+            let should_mute: bool = {
+                let mute_manager_mutex_guard = self.mute_manager.lock().await;
+                mute_manager_mutex_guard
+                    .should_mute_notification_for_pubkey(event, &pubkey)
+                    .await
+            };
             if !should_mute {
                 pubkeys_to_notify.insert(pubkey);
             }
@@ -188,7 +195,7 @@ impl NotificationManager {
         Ok(pubkeys_to_notify)
     }
 
-    fn pubkeys_relevant_to_event(
+    async fn pubkeys_relevant_to_event(
         &self,
         event: &Event,
     ) -> Result<HashSet<PublicKey>, Box<dyn std::error::Error>> {
@@ -196,17 +203,18 @@ impl NotificationManager {
         let referenced_event_ids = event.referenced_event_ids();
         for referenced_event_id in referenced_event_ids {
             let pubkeys_relevant_to_referenced_event =
-                self.pubkeys_subscribed_to_event_id(&referenced_event_id)?;
+                self.pubkeys_subscribed_to_event_id(&referenced_event_id).await?;
             relevant_pubkeys.extend(pubkeys_relevant_to_referenced_event);
         }
         Ok(relevant_pubkeys)
     }
 
-    fn pubkeys_subscribed_to_event_id(
+    async fn pubkeys_subscribed_to_event_id(
         &self,
         event_id: &EventId,
     ) -> Result<HashSet<PublicKey>, Box<dyn std::error::Error>> {
-        let connection = self.db.get()?;
+        let db_mutex_guard = self.db.lock().await;
+        let connection = db_mutex_guard.get()?;
         let mut stmt = connection.prepare("SELECT pubkey FROM notifications WHERE event_id = ?")?;
         let pubkeys = stmt
             .query_map([event_id.to_sql_string()], |row| row.get(0))?
@@ -221,7 +229,7 @@ impl NotificationManager {
         event: &Event,
         pubkey: &PublicKey,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let user_device_tokens = self.get_user_device_tokens(pubkey)?;
+        let user_device_tokens = self.get_user_device_tokens(pubkey).await?;
         for device_token in user_device_tokens {
             self.send_event_notification_to_device_token(event, &device_token)
                 .await?;
@@ -229,11 +237,12 @@ impl NotificationManager {
         Ok(())
     }
 
-    fn get_user_device_tokens(
+    async fn get_user_device_tokens(
         &self,
         pubkey: &PublicKey,
     ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-        let connection = self.db.get()?;
+        let db_mutex_guard = self.db.lock().await;
+        let connection = db_mutex_guard.get()?;
         let mut stmt = connection.prepare("SELECT device_token FROM user_info WHERE pubkey = ?")?;
         let device_tokens = stmt
             .query_map([pubkey.to_sql_string()], |row| row.get(0))?
@@ -242,11 +251,12 @@ impl NotificationManager {
         Ok(device_tokens)
     }
 
-    fn get_notification_status(
+    async fn get_notification_status(
         &self,
         event: &Event,
     ) -> Result<NotificationStatus, Box<dyn std::error::Error>> {
-        let connection = self.db.get()?;
+        let db_mutex_guard = self.db.lock().await;
+        let connection = db_mutex_guard.get()?;
         let mut stmt = connection.prepare(
             "SELECT pubkey, received_notification FROM notifications WHERE event_id = ?",
         )?;
@@ -291,7 +301,8 @@ impl NotificationManager {
         let _ = payload.add_custom_data("nostr_event", event);
         payload.options.apns_topic = Some(self.apns_topic.as_str());
 
-        let _response = self.apns_client.send(payload).await?;
+        let apns_client_mutex_guard = self.apns_client.lock().await;
+        let _response = apns_client_mutex_guard.send(payload).await?;
 
         log::info!("Notification sent to device token: {}", device_token);
 
@@ -305,13 +316,14 @@ impl NotificationManager {
         (title, subtitle, body)
     }
 
-    pub fn save_user_device_info(
+    pub async fn save_user_device_info(
         &self,
         pubkey: nostr::PublicKey,
         device_token: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let current_time_unix = Timestamp::now();
-        self.db.get()?.execute(
+        let db_mutex_guard = self.db.lock().await;
+        db_mutex_guard.get()?.execute(
             "INSERT OR REPLACE INTO user_info (id, pubkey, device_token, added_at) VALUES (?, ?, ?, ?)",
             params![
                 format!("{}:{}", pubkey.to_sql_string(), device_token), 
@@ -323,12 +335,13 @@ impl NotificationManager {
         Ok(())
     }
 
-    pub fn remove_user_device_info(
+    pub async fn remove_user_device_info(
         &self,
         pubkey: nostr::PublicKey,
         device_token: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        self.db.get()?.execute(
+        let db_mutex_guard = self.db.lock().await;
+        db_mutex_guard.get()?.execute(
             "DELETE FROM user_info WHERE pubkey = ? AND device_token = ?",
             params![pubkey.to_sql_string(), device_token],
         )?;

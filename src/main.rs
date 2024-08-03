@@ -2,7 +2,6 @@
 use hyper_util::rt::TokioIo;
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use tokio::sync::Mutex;
 mod notification_manager;
 use env_logger;
 use log;
@@ -31,7 +30,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         r2d2::Pool::new(manager).expect("Failed to create SQLite connection pool");
     // Notification manager is a shared resource that will be used by all connections via a mutex and an atomic reference counter.
     // This is shared to avoid data races when reading/writing to the sqlite database, and reduce outgoing relay connections.
-    let notification_manager = Arc::new(Mutex::new(
+    let notification_manager = Arc::new(
         notification_manager::NotificationManager::new(
             pool,
             env.relay_url.clone(),
@@ -43,7 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         )
         .await
         .expect("Failed to create notification manager"),
-    ));
+    );
     let api_handler = Arc::new(api_request_handler::APIHandler::new(
         notification_manager.clone(),
         env.api_base_url.clone(),

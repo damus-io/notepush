@@ -11,20 +11,19 @@ use serde_json::Value;
 use std::fmt::{self, Debug};
 use std::str::FromStr;
 use std::sync::Arc;
-use tokio::sync::Mutex;
 use tungstenite::{Error, Message};
 
 const MAX_CONSECUTIVE_ERRORS: u32 = 10;
 
 pub struct RelayConnection {
-    notification_manager: Arc<Mutex<NotificationManager>>,
+    notification_manager: Arc<NotificationManager>,
 }
 
 impl RelayConnection {
     // MARK: - Initializers
 
     pub async fn new(
-        notification_manager: Arc<Mutex<NotificationManager>>,
+        notification_manager: Arc<NotificationManager>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         log::info!("Accepted websocket connection");
         Ok(RelayConnection {
@@ -34,7 +33,7 @@ impl RelayConnection {
 
     pub async fn run(
         websocket: HyperWebsocket,
-        notification_manager: Arc<Mutex<NotificationManager>>,
+        notification_manager: Arc<NotificationManager>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut connection = RelayConnection::new(notification_manager).await?;
         Ok(connection.run_loop(websocket).await?)
@@ -104,11 +103,7 @@ impl RelayConnection {
         match message {
             ClientMessage::Event(event) => {
                 log::info!("Received event: {:?}", event);
-                {
-                    // TODO: Reduce resource contention by reducing the scope of the mutex into NotificationManager logic.
-                    let mutex_guard = self.notification_manager.lock().await;
-                    mutex_guard.send_notifications_if_needed(&event).await?;
-                }; // Only hold the mutex for as little time as possible.
+                self.notification_manager.send_notifications_if_needed(&event).await?;
                 let notice_message = format!("blocked: This relay does not store events");
                 let response = RelayMessage::Ok {
                     event_id: event.id,

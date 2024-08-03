@@ -16,7 +16,6 @@ use log;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use thiserror::Error;
-use tokio::sync::Mutex;
 
 struct ParsedRequest {
     uri: String,
@@ -41,7 +40,7 @@ struct APIResponse {
 }
 
 pub struct APIHandler {
-    notification_manager: Arc<Mutex<NotificationManager>>,
+    notification_manager: Arc<NotificationManager>,
     base_url: String,
 }
 
@@ -55,7 +54,7 @@ impl Clone for APIHandler {
 }
 
 impl APIHandler {
-    pub fn new(notification_manager: Arc<Mutex<NotificationManager>>, base_url: String) -> Self {
+    pub fn new(notification_manager: Arc<NotificationManager>, base_url: String) -> Self {
         APIHandler {
             notification_manager,
             base_url,
@@ -229,8 +228,7 @@ impl APIHandler {
         let body = req.body_json()?;
 
         if let Some(device_token) = body["deviceToken"].as_str() {
-            let notification_manager = self.notification_manager.lock().await;
-            notification_manager.save_user_device_info(req.authorized_pubkey, device_token)?;
+            self.notification_manager.save_user_device_info(req.authorized_pubkey, device_token).await?;
             return Ok(APIResponse {
                 status: StatusCode::OK,
                 body: json!({ "message": "User info saved successfully" }),
@@ -250,8 +248,7 @@ impl APIHandler {
         let body: Value = req.body_json()?;
 
         if let Some(device_token) = body["deviceToken"].as_str() {
-            let notification_manager = self.notification_manager.lock().await;
-            notification_manager.remove_user_device_info(req.authorized_pubkey, device_token)?;
+            self.notification_manager.remove_user_device_info(req.authorized_pubkey, device_token).await?;
             return Ok(APIResponse {
                 status: StatusCode::OK,
                 body: json!({ "message": "User info removed successfully" }),
