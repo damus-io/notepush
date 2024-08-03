@@ -3,6 +3,7 @@ use log;
 use nostr::event::EventId;
 use nostr::key::PublicKey;
 use nostr::types::Timestamp;
+use nostr_sdk::JsonUtil;
 use rusqlite;
 use rusqlite::params;
 use tokio::sync::Mutex;
@@ -290,16 +291,17 @@ impl NotificationManager {
 
         log::debug!("Sending notification to device token: {}", device_token);
 
-        let builder = DefaultNotificationBuilder::new()
+        let mut payload = DefaultNotificationBuilder::new()
             .set_title(&title)
             .set_subtitle(&subtitle)
             .set_body(&body)
             .set_mutable_content()
-            .set_content_available();
+            .set_content_available()
+            .build(device_token, Default::default());
 
-        let mut payload = builder.build(device_token, Default::default());
-        let _ = payload.add_custom_data("nostr_event", event);
         payload.options.apns_topic = Some(self.apns_topic.as_str());
+        payload.data.insert("nostr_event", serde_json::Value::String(event.try_as_json()?));
+        
 
         let apns_client_mutex_guard = self.apns_client.lock().await;
         let _response = apns_client_mutex_guard.send(payload).await?;
