@@ -312,10 +312,17 @@ impl NotificationManager {
     }
 
     fn format_notification_message(&self, event: &Event) -> (String, String, String) {
-        let title = "New activity".to_string();
-        let subtitle = format!("From: {}", event.pubkey);
-        let body = event.content.clone();
-        (title, subtitle, body)
+        // NOTE: This is simple because the client will handle formatting. These are just fallbacks.
+        let (title, body) = match event.kind {
+            nostr_sdk::Kind::TextNote => ("New activity".to_string(), event.content.clone()),
+            nostr_sdk::Kind::EncryptedDirectMessage => ("New direct message".to_string(), "Contents are encrypted".to_string()),
+            nostr_sdk::Kind::Repost => ("Someone reposted".to_string(), event.content.clone()),
+            nostr_sdk::Kind::Reaction => ("New reaction".to_string(), event.content.clone()),
+            nostr_sdk::Kind::ZapPrivateMessage => ("New zap private message".to_string(), "Contents are encrypted".to_string()),
+            nostr_sdk::Kind::ZapReceipt => ("Someone zapped you".to_string(), "".to_string()),
+            _ => ("New activity".to_string(), "".to_string()),
+        };
+        (title, "".to_string(), body)
     }
 
     pub async fn save_user_device_info(
