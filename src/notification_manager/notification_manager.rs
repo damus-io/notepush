@@ -138,6 +138,11 @@ impl NotificationManager {
             log::debug!("Event is older than a week, not sending notifications");
             return Ok(());
         }
+        
+        if !Self::is_event_kind_supported(event.kind) {
+            log::debug!("Event kind is not supported, not sending notifications");
+            return Ok(());
+        }
 
         let pubkeys_to_notify = self.pubkeys_to_notify_for_event(event).await?;
 
@@ -165,6 +170,20 @@ impl NotificationManager {
             }
         }
         Ok(())
+    }
+    
+    fn is_event_kind_supported(event_kind: nostr::Kind) -> bool {
+        match event_kind {
+            nostr_sdk::Kind::TextNote => true,
+            nostr_sdk::Kind::EncryptedDirectMessage => true,
+            nostr_sdk::Kind::Repost => true,
+            nostr_sdk::Kind::GenericRepost => true,
+            nostr_sdk::Kind::Reaction => true,
+            nostr_sdk::Kind::ZapPrivateMessage => true,
+            nostr_sdk::Kind::ZapRequest => false,
+            nostr_sdk::Kind::ZapReceipt => true,
+            _ => false,
+        }
     }
 
     async fn pubkeys_to_notify_for_event(
