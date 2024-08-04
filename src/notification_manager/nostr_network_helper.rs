@@ -2,16 +2,16 @@ use super::ExtendedEvent;
 use nostr_sdk::prelude::*;
 use tokio::time::{timeout, Duration};
 
-pub struct MuteManager {
+pub struct NostrNetworkHelper {
     client: Client,
 }
 
-impl MuteManager {
+impl NostrNetworkHelper {
     pub async fn new(relay_url: String) -> Result<Self, Box<dyn std::error::Error>> {
         let client = Client::new(&Keys::generate());
         client.add_relay(relay_url.clone()).await?;
         client.connect().await;
-        Ok(MuteManager { client })
+        Ok(NostrNetworkHelper { client })
     }
 
     pub async fn should_mute_notification_for_pubkey(
@@ -124,5 +124,64 @@ impl MuteManager {
 
         self.client.unsubscribe(this_subscription_id).await;
         mute_list
+    }
+    
+    pub async fn does_pubkey_follow_pubkey(
+        &self,
+        source_pubkey: &PublicKey,
+        target_pubkey: &PublicKey,
+    ) -> bool {
+        log::debug!(
+            "Checking if pubkey {:?} follows pubkey {:?}",
+            source_pubkey,
+            target_pubkey
+        );
+        if let Some(contact_list) = self.get_contact_list(source_pubkey).await {
+            let tag_contents = contact_list.get_tags_content(TagKind::SingleLetter(SingleLetterTag {
+                character: Alphabet::P,
+                uppercase: false,
+            }));
+            return tag_contents.iter().any(|t| t == &target_pubkey.to_hex());
+        }
+        false
+    }
+    
+    pub async fn get_contact_list(&self, pubkey: &PublicKey) -> Option<Event> {
+        let subscription_filter = Filter::new()
+            .kinds(vec![Kind::ContactList])
+            .authors(vec![pubkey.clone()])
+            .limit(1);
+
+        let this_subscription_id = self
+            .client
+            .subscribe(Vec::from([subscription_filter]), None)
+            .await;
+
+        let mut contact_list: Option<Event> = None;
+        let mut notifications = self.client.notifications();
+
+        let timeout_duration = Duration::from_secs(10);
+        while let Ok(result) = timeout(timeout_duration, notifications.recv()).await {
+            if let Ok(notification) = result {
+                if let RelayPoolNotification::Event {
+                    subscription_id,
+                    event,
+                    ..
+                } = notification
+                {
+                    if this_subscription_id == subscription_id && event.kind == Kind::ContactList {
+                        contact_list = Some((*event).clone());
+                        break;
+                    }
+                }
+            }
+        }
+        
+        if contact_list.is_none() {
+            log::debug!("Contact list not found for pubkey {:?}", pubkey);
+        }
+
+        self.client.unsubscribe(this_subscription_id).await;
+        contact_list
     }
 }
