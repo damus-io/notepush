@@ -4,8 +4,11 @@ use nostr::event::EventId;
 use nostr::key::PublicKey;
 use nostr::types::Timestamp;
 use nostr_sdk::JsonUtil;
+use nostr_sdk::Kind;
 use rusqlite;
 use rusqlite::params;
+use serde::Deserialize;
+use serde::Serialize;
 use tokio::sync::Mutex;
 use std::collections::HashSet;
 use tokio;
@@ -65,6 +68,8 @@ impl NotificationManager {
     // MARK: - Database setup operations
 
     pub fn setup_database(db: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
+        // Initial schema setup
+        
         db.execute(
             "CREATE TABLE IF NOT EXISTS notifications (
                 id TEXT PRIMARY KEY,
@@ -94,8 +99,17 @@ impl NotificationManager {
             [],
         )?;
 
-        Self::add_column_if_not_exists(&db, "notifications", "sent_at", "INTEGER")?;
-        Self::add_column_if_not_exists(&db, "user_info", "added_at", "INTEGER")?;
+        Self::add_column_if_not_exists(&db, "notifications", "sent_at", "INTEGER", None)?;
+        Self::add_column_if_not_exists(&db, "user_info", "added_at", "INTEGER", None)?;
+        
+        // Notification settings migration (https://github.com/damus-io/damus/issues/2360)
+        
+        Self::add_column_if_not_exists(&db, "user_info", "zap_notifications_enabled", "BOOLEAN", Some("true"))?;
+        Self::add_column_if_not_exists(&db, "user_info", "mention_notifications_enabled", "BOOLEAN", Some("true"))?;
+        Self::add_column_if_not_exists(&db, "user_info", "repost_notifications_enabled", "BOOLEAN", Some("true"))?;
+        Self::add_column_if_not_exists(&db, "user_info", "reaction_notifications_enabled", "BOOLEAN", Some("true"))?;
+        Self::add_column_if_not_exists(&db, "user_info", "dm_notifications_enabled", "BOOLEAN", Some("true"))?;
+        Self::add_column_if_not_exists(&db, "user_info", "only_notifications_from_following_enabled", "BOOLEAN", Some("false"))?;
 
         Ok(())
     }
@@ -105,6 +119,7 @@ impl NotificationManager {
         table_name: &str,
         column_name: &str,
         column_type: &str,
+        default_value: Option<&str>,
     ) -> Result<(), rusqlite::Error> {
         let query = format!("PRAGMA table_info({})", table_name);
         let mut stmt = db.prepare(&query)?;
@@ -115,8 +130,11 @@ impl NotificationManager {
 
         if !column_names.contains(&column_name.to_string()) {
             let query = format!(
-                "ALTER TABLE {} ADD COLUMN {} {}",
-                table_name, column_name, column_type
+                "ALTER TABLE {} ADD COLUMN {} {} {}",
+                table_name, column_name, column_type, match default_value {
+                    Some(value) => format!("DEFAULT {}", value),
+                    None => "".to_string(),
+                },
             );
             db.execute(&query, [])?;
         }
@@ -251,10 +269,33 @@ impl NotificationManager {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let user_device_tokens = self.get_user_device_tokens(pubkey).await?;
         for device_token in user_device_tokens {
+            if !self.user_wants_notification(pubkey, device_token.clone(), event).await? {
+                continue;
+            }
             self.send_event_notification_to_device_token(event, &device_token)
                 .await?;
         }
         Ok(())
+    }
+    
+    async fn user_wants_notification(
+        &self,
+        pubkey: &PublicKey,
+        device_token: String,
+        event: &Event,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        let notification_preferences = self.get_user_notification_settings(pubkey, device_token).await?;
+        match event.kind {
+            Kind::TextNote => Ok(notification_preferences.mention_notifications_enabled),   // TODO: Not 100% accurate
+            Kind::EncryptedDirectMessage => Ok(notification_preferences.dm_notifications_enabled),
+            Kind::Repost => Ok(notification_preferences.repost_notifications_enabled),
+            Kind::GenericRepost => Ok(notification_preferences.repost_notifications_enabled),
+            Kind::Reaction => Ok(notification_preferences.reaction_notifications_enabled),
+            Kind::ZapPrivateMessage => Ok(notification_preferences.zap_notifications_enabled),
+            Kind::ZapRequest => Ok(notification_preferences.zap_notifications_enabled),
+            Kind::ZapReceipt => Ok(notification_preferences.zap_notifications_enabled),
+            _ => Ok(false),
+        }
     }
 
     async fn get_user_device_tokens(
@@ -343,6 +384,8 @@ impl NotificationManager {
         };
         (title, "".to_string(), body)
     }
+    
+    // MARK: - User device info and settings
 
     pub async fn save_user_device_info(
         &self,
@@ -375,6 +418,65 @@ impl NotificationManager {
         )?;
         Ok(())
     }
+    
+    pub async fn get_user_notification_settings(
+        &self,
+        pubkey: &PublicKey,
+        device_token: String,
+    ) -> Result<UserNotificationSettings, Box<dyn std::error::Error>> {
+        let db_mutex_guard = self.db.lock().await;
+        let connection = db_mutex_guard.get()?;
+        let mut stmt = connection.prepare(
+            "SELECT zap_notifications_enabled, mention_notifications_enabled, repost_notifications_enabled, reaction_notifications_enabled, dm_notifications_enabled, only_notifications_from_following_enabled FROM user_info WHERE pubkey = ? AND device_token = ?",
+        )?;
+        let settings = stmt
+            .query_row([pubkey.to_sql_string(), device_token], |row| {
+                Ok(UserNotificationSettings {
+                    zap_notifications_enabled: row.get(0)?,
+                    mention_notifications_enabled: row.get(1)?,
+                    repost_notifications_enabled: row.get(2)?,
+                    reaction_notifications_enabled: row.get(3)?,
+                    dm_notifications_enabled: row.get(4)?,
+                    only_notifications_from_following_enabled: row.get(5)?,
+                })
+            })?;
+        
+        Ok(settings)
+    }
+    
+    pub async fn save_user_notification_settings(
+        &self,
+        pubkey: &PublicKey,
+        device_token: String,
+        settings: UserNotificationSettings,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let db_mutex_guard = self.db.lock().await;
+        let connection = db_mutex_guard.get()?;
+        connection.execute(
+            "UPDATE user_info SET zap_notifications_enabled = ?, mention_notifications_enabled = ?, repost_notifications_enabled = ?, reaction_notifications_enabled = ?, dm_notifications_enabled = ?, only_notifications_from_following_enabled = ? WHERE pubkey = ? AND device_token = ?",
+            params![
+                settings.zap_notifications_enabled,
+                settings.mention_notifications_enabled,
+                settings.repost_notifications_enabled,
+                settings.reaction_notifications_enabled,
+                settings.dm_notifications_enabled,
+                settings.only_notifications_from_following_enabled,
+                pubkey.to_sql_string(),
+                device_token,
+            ],
+        )?;
+        Ok(())
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct UserNotificationSettings {
+    zap_notifications_enabled: bool,
+    mention_notifications_enabled: bool,
+    repost_notifications_enabled: bool,
+    reaction_notifications_enabled: bool,
+    dm_notifications_enabled: bool,
+    only_notifications_from_following_enabled: bool
 }
 
 struct NotificationStatus {
