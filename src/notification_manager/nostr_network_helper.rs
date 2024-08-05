@@ -1,18 +1,25 @@
+use super::nostr_event_extensions::MaybeConvertibleToMuteList;
 use super::ExtendedEvent;
 use nostr_sdk::prelude::*;
 use tokio::time::{timeout, Duration};
+
+const NOTE_FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct NostrNetworkHelper {
     client: Client,
 }
 
 impl NostrNetworkHelper {
+    // MARK: - Initialization
+
     pub async fn new(relay_url: String) -> Result<Self, Box<dyn std::error::Error>> {
         let client = Client::new(&Keys::generate());
         client.add_relay(relay_url.clone()).await?;
         client.connect().await;
         Ok(NostrNetworkHelper { client })
     }
+
+    // MARK: - Answering questions about a user
 
     pub async fn should_mute_notification_for_pubkey(
         &self,
@@ -25,107 +32,40 @@ impl NostrNetworkHelper {
             pubkey
         );
         if let Some(mute_list) = self.get_public_mute_list(pubkey).await {
-            for tag in mute_list.tags() {
-                match tag.kind() {
-                    TagKind::SingleLetter(SingleLetterTag {
-                        character: Alphabet::P,
-                        uppercase: false,
-                    }) => {
-                        let tagged_pubkey: Option<PublicKey> =
-                            tag.content().and_then(|h| PublicKey::from_hex(h).ok());
-                        if let Some(tagged_pubkey) = tagged_pubkey {
-                            if event.pubkey == tagged_pubkey {
-                                return true;
-                            }
-                        }
-                    }
-                    TagKind::SingleLetter(SingleLetterTag {
-                        character: Alphabet::E,
-                        uppercase: false,
-                    }) => {
-                        let tagged_event_id: Option<EventId> =
-                            tag.content().and_then(|h| EventId::from_hex(h).ok());
-                        if let Some(tagged_event_id) = tagged_event_id {
-                            if event.id == tagged_event_id
-                                || event.referenced_event_ids().contains(&tagged_event_id)
-                            {
-                                return true;
-                            }
-                        }
-                    }
-                    TagKind::SingleLetter(SingleLetterTag {
-                        character: Alphabet::T,
-                        uppercase: false,
-                    }) => {
-                        let tagged_hashtag: Option<String> = tag.content().map(|h| h.to_string());
-                        if let Some(tagged_hashtag) = tagged_hashtag {
-                            let tags_content =
-                                event.get_tags_content(TagKind::SingleLetter(SingleLetterTag {
-                                    character: Alphabet::T,
-                                    uppercase: false,
-                                }));
-                            let should_mute = tags_content.iter().any(|t| t == &tagged_hashtag);
-                            return should_mute;
-                        }
-                    }
-                    TagKind::Word => {
-                        let tagged_word: Option<String> = tag.content().map(|h| h.to_string());
-                        if let Some(tagged_word) = tagged_word {
-                            if event
-                                .content
-                                .to_lowercase()
-                                .contains(&tagged_word.to_lowercase())
-                            {
-                                return true;
-                            }
-                        }
-                    }
-                    _ => {}
+            for muted_public_key in mute_list.public_keys {
+                if event.pubkey == muted_public_key {
+                    return true;
+                }
+            }
+            for muted_event_id in mute_list.event_ids {
+                if event.id == muted_event_id
+                    || event.referenced_event_ids().contains(&muted_event_id)
+                {
+                    return true;
+                }
+            }
+            for muted_hashtag in mute_list.hashtags {
+                if event
+                    .referenced_hashtags()
+                    .iter()
+                    .any(|t| t == &muted_hashtag)
+                {
+                    return true;
+                }
+            }
+            for muted_word in mute_list.words {
+                if event
+                    .content
+                    .to_lowercase()
+                    .contains(&muted_word.to_lowercase())
+                {
+                    return true;
                 }
             }
         }
         false
     }
 
-    pub async fn get_public_mute_list(&self, pubkey: &PublicKey) -> Option<Event> {
-        let subscription_filter = Filter::new()
-            .kinds(vec![Kind::MuteList])
-            .authors(vec![pubkey.clone()])
-            .limit(1);
-
-        let this_subscription_id = self
-            .client
-            .subscribe(Vec::from([subscription_filter]), None)
-            .await;
-
-        let mut mute_list: Option<Event> = None;
-        let mut notifications = self.client.notifications();
-
-        let timeout_duration = Duration::from_secs(10);
-        while let Ok(result) = timeout(timeout_duration, notifications.recv()).await {
-            if let Ok(notification) = result {
-                if let RelayPoolNotification::Event {
-                    subscription_id,
-                    event,
-                    ..
-                } = notification
-                {
-                    if this_subscription_id == subscription_id && event.kind == Kind::MuteList {
-                        mute_list = Some((*event).clone());
-                        break;
-                    }
-                }
-            }
-        }
-        
-        if mute_list.is_none() {
-            log::debug!("Mute list not found for pubkey {:?}", pubkey);
-        }
-
-        self.client.unsubscribe(this_subscription_id).await;
-        mute_list
-    }
-    
     pub async fn does_pubkey_follow_pubkey(
         &self,
         source_pubkey: &PublicKey,
@@ -137,19 +77,29 @@ impl NostrNetworkHelper {
             target_pubkey
         );
         if let Some(contact_list) = self.get_contact_list(source_pubkey).await {
-            let tag_contents = contact_list.get_tags_content(TagKind::SingleLetter(SingleLetterTag {
-                character: Alphabet::P,
-                uppercase: false,
-            }));
-            return tag_contents.iter().any(|t| t == &target_pubkey.to_hex());
+            return contact_list.referenced_pubkeys().contains(target_pubkey);
         }
         false
     }
-    
+
+    // MARK: - Fetching specific event types
+
+    pub async fn get_public_mute_list(&self, pubkey: &PublicKey) -> Option<MuteList> {
+        self.fetch_single_event(pubkey, Kind::MuteList)
+            .await?
+            .to_mute_list()
+    }
+
     pub async fn get_contact_list(&self, pubkey: &PublicKey) -> Option<Event> {
+        self.fetch_single_event(pubkey, Kind::ContactList).await
+    }
+
+    // MARK: - Lower level fetching functions
+
+    async fn fetch_single_event(&self, author: &PublicKey, kind: Kind) -> Option<Event> {
         let subscription_filter = Filter::new()
-            .kinds(vec![Kind::ContactList])
-            .authors(vec![pubkey.clone()])
+            .kinds(vec![kind])
+            .authors(vec![author.clone()])
             .limit(1);
 
         let this_subscription_id = self
@@ -157,31 +107,30 @@ impl NostrNetworkHelper {
             .subscribe(Vec::from([subscription_filter]), None)
             .await;
 
-        let mut contact_list: Option<Event> = None;
+        let mut event: Option<Event> = None;
         let mut notifications = self.client.notifications();
 
-        let timeout_duration = Duration::from_secs(10);
-        while let Ok(result) = timeout(timeout_duration, notifications.recv()).await {
+        while let Ok(result) = timeout(NOTE_FETCH_TIMEOUT, notifications.recv()).await {
             if let Ok(notification) = result {
                 if let RelayPoolNotification::Event {
                     subscription_id,
-                    event,
+                    event: event_option,
                     ..
                 } = notification
                 {
-                    if this_subscription_id == subscription_id && event.kind == Kind::ContactList {
-                        contact_list = Some((*event).clone());
+                    if this_subscription_id == subscription_id && event_option.kind == kind {
+                        event = Some((*event_option).clone());
                         break;
                     }
                 }
             }
         }
-        
-        if contact_list.is_none() {
-            log::debug!("Contact list not found for pubkey {:?}", pubkey);
+
+        if event.is_none() {
+            log::info!("Event of kind {:?} not found for pubkey {:?}", kind, author);
         }
 
         self.client.unsubscribe(this_subscription_id).await;
-        contact_list
+        event
     }
 }
