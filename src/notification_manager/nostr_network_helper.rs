@@ -1,12 +1,15 @@
 use super::nostr_event_extensions::MaybeConvertibleToMuteList;
 use super::ExtendedEvent;
 use nostr_sdk::prelude::*;
+use super::nostr_event_cache::Cache;
 use tokio::time::{timeout, Duration};
 
 const NOTE_FETCH_TIMEOUT: Duration = Duration::from_secs(5);
+const CACHE_MAX_AGE: Duration = Duration::from_secs(60);
 
 pub struct NostrNetworkHelper {
     client: Client,
+    cache: Cache,
 }
 
 impl NostrNetworkHelper {
@@ -16,13 +19,14 @@ impl NostrNetworkHelper {
         let client = Client::new(&Keys::generate());
         client.add_relay(relay_url.clone()).await?;
         client.connect().await;
-        Ok(NostrNetworkHelper { client })
+        
+        Ok(NostrNetworkHelper { client, cache: Cache::new(CACHE_MAX_AGE) })
     }
 
     // MARK: - Answering questions about a user
 
     pub async fn should_mute_notification_for_pubkey(
-        &self,
+        &mut self,
         event: &Event,
         pubkey: &PublicKey,
     ) -> bool {
@@ -67,7 +71,7 @@ impl NostrNetworkHelper {
     }
 
     pub async fn does_pubkey_follow_pubkey(
-        &self,
+        &mut self,
         source_pubkey: &PublicKey,
         target_pubkey: &PublicKey,
     ) -> bool {
@@ -82,16 +86,32 @@ impl NostrNetworkHelper {
         false
     }
 
-    // MARK: - Fetching specific event types
+    // MARK: - Getting specific event types with caching
 
-    pub async fn get_public_mute_list(&self, pubkey: &PublicKey) -> Option<MuteList> {
-        self.fetch_single_event(pubkey, Kind::MuteList)
-            .await?
-            .to_mute_list()
+    pub async fn get_public_mute_list(&mut self, pubkey: &PublicKey) -> Option<MuteList> {
+        match self.cache.get_mute_list(pubkey) {
+            Ok(optional_mute_list) => optional_mute_list,
+            Err(_) => {
+                // We don't have an answer from the cache, so we need to fetch it
+                let mute_list_event = self.fetch_single_event(pubkey, Kind::MuteList)
+                    .await;
+                self.cache.add_optional_mute_list_with_author(pubkey, mute_list_event.clone());
+                mute_list_event?.to_mute_list()
+            }
+        }
     }
 
-    pub async fn get_contact_list(&self, pubkey: &PublicKey) -> Option<Event> {
-        self.fetch_single_event(pubkey, Kind::ContactList).await
+    pub async fn get_contact_list(&mut self, pubkey: &PublicKey) -> Option<Event> {
+        match self.cache.get_contact_list(pubkey) {
+            Ok(optional_contact_list) => optional_contact_list,
+            Err(_) => {
+                // We don't have an answer from the cache, so we need to fetch it
+                let contact_list_event = self.fetch_single_event(pubkey, Kind::ContactList)
+                    .await;
+                self.cache.add_optional_contact_list_with_author(pubkey, contact_list_event.clone());
+                contact_list_event
+            }
+        }
     }
 
     // MARK: - Lower level fetching functions
