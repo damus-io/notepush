@@ -27,7 +27,7 @@ pub struct NotificationManager {
     db: Mutex<r2d2::Pool<SqliteConnectionManager>>,
     apns_topic: String,
     apns_client: Mutex<Client>,
-    nostr_network_helper: Mutex<NostrNetworkHelper>,
+    nostr_network_helper: NostrNetworkHelper,
 }
 
 impl NotificationManager {
@@ -42,8 +42,6 @@ impl NotificationManager {
         apns_environment: a2::client::Endpoint,
         apns_topic: String,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let mute_manager = NostrNetworkHelper::new(relay_url.clone()).await?;
-
         let connection = db.get()?;
         Self::setup_database(&connection)?;
 
@@ -60,7 +58,7 @@ impl NotificationManager {
             apns_topic,
             apns_client: Mutex::new(client),
             db: Mutex::new(db),
-            nostr_network_helper: Mutex::new(mute_manager),
+            nostr_network_helper: NostrNetworkHelper::new(relay_url.clone()).await?,
         })
     }
 
@@ -220,8 +218,7 @@ impl NotificationManager {
         let mut pubkeys_to_notify = HashSet::new();
         for pubkey in relevant_pubkeys_yet_to_receive {
             let should_mute: bool = {
-                let mut mute_manager_mutex_guard = self.nostr_network_helper.lock().await;
-                mute_manager_mutex_guard
+                self.nostr_network_helper
                     .should_mute_notification_for_pubkey(event, &pubkey)
                     .await
             };
@@ -285,8 +282,7 @@ impl NotificationManager {
     ) -> Result<bool, Box<dyn std::error::Error>> {
         let notification_preferences = self.get_user_notification_settings(pubkey, device_token).await?;
         if notification_preferences.only_notifications_from_following_enabled {
-            let mut nostr_network_helper_mutex_guard = self.nostr_network_helper.lock().await;
-            if !nostr_network_helper_mutex_guard.does_pubkey_follow_pubkey(pubkey, &event.author()).await {
+            if !self.nostr_network_helper.does_pubkey_follow_pubkey(pubkey, &event.author()).await {
                 return Ok(false);
             }
         }
