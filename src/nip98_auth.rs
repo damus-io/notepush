@@ -3,8 +3,8 @@ use nostr;
 use nostr::bitcoin::hashes::sha256::Hash as Sha256Hash;
 use nostr::bitcoin::hashes::Hash;
 use nostr::util::hex;
-use nostr::Timestamp;
 use serde_json::Value;
+use super::utils::time_delta::TimeDelta;
 
 pub async fn nip98_verify_auth_header(
     auth_header: String,
@@ -105,37 +105,4 @@ pub async fn nip98_verify_auth_header(
     }
 
     Ok(note.pubkey)
-}
-
-struct TimeDelta {
-    delta_abs_seconds: u64,
-    negative: bool,
-}
-
-impl TimeDelta {
-    /// Safely calculate the difference between two timestamps in seconds
-    /// This function is safer against overflows than subtracting the timestamps directly
-    fn subtracting(t1: Timestamp, t2: Timestamp) -> TimeDelta {
-        if t1 > t2 {
-            TimeDelta {
-                delta_abs_seconds: (t1 - t2).as_u64(),
-                negative: false,
-            }
-        } else {
-            TimeDelta {
-                delta_abs_seconds: (t2 - t1).as_u64(),
-                negative: true,
-            }
-        }
-    }
-}
-
-impl std::fmt::Display for TimeDelta {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        if self.negative {
-            write!(f, "-{}", self.delta_abs_seconds)
-        } else {
-            write!(f, "{}", self.delta_abs_seconds)
-        }
-    }
 }
