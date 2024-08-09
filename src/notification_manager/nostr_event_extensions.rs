@@ -1,4 +1,5 @@
-use nostr::{self, key::PublicKey, Alphabet, SingleLetterTag, TagKind::SingleLetter};
+use nostr::{self, key::PublicKey, nips::nip51::MuteList, Alphabet, SingleLetterTag, TagKind::SingleLetter};
+use nostr_sdk::{Kind, TagKind};
 
 /// Temporary scaffolding of old methods that have not been ported to use native Event methods
 pub trait ExtendedEvent {
@@ -13,6 +14,9 @@ pub trait ExtendedEvent {
 
     /// Retrieves a set of event IDs referenced by the note
     fn referenced_event_ids(&self) -> std::collections::HashSet<nostr::EventId>;
+    
+    /// Retrieves a set of hashtags (t tags) referenced by the note
+    fn referenced_hashtags(&self) -> std::collections::HashSet<String>;
 }
 
 // This is a wrapper around the Event type from strfry-policies, which adds some useful methods
@@ -42,6 +46,14 @@ impl ExtendedEvent for nostr::Event {
         self.get_tag_content(SingleLetter(SingleLetterTag::lowercase(Alphabet::E)))
             .iter()
             .filter_map(|tag| nostr::EventId::from_hex(tag).ok())
+            .collect()
+    }
+    
+    /// Retrieves a set of hashtags (t tags) referenced by the note
+    fn referenced_hashtags(&self) -> std::collections::HashSet<String> {
+        self.get_tags_content(SingleLetter(SingleLetterTag::lowercase(Alphabet::T)))
+            .iter()
+            .map(|tag| tag.to_string())
             .collect()
     }
 }
@@ -83,5 +95,23 @@ impl SqlStringConvertible for nostr::Timestamp {
     fn from_sql_string(s: String) -> Result<Self, Box<dyn std::error::Error>> {
         let u64_timestamp: u64 = s.parse()?;
         Ok(nostr::Timestamp::from(u64_timestamp))
+    }
+}
+
+pub trait MaybeConvertibleToMuteList {
+    fn to_mute_list(&self) -> Option<MuteList>;
+}
+
+impl MaybeConvertibleToMuteList for nostr::Event {
+    fn to_mute_list(&self) -> Option<MuteList> {
+        if self.kind != Kind::MuteList {
+            return None;
+        }
+        Some(MuteList { 
+            public_keys: self.referenced_pubkeys().iter().map(|pk| pk.clone()).collect(),
+            hashtags: self.referenced_hashtags().iter().map(|tag| tag.clone()).collect(),
+            event_ids: self.referenced_event_ids().iter().map(|id| id.clone()).collect(),
+            words: self.get_tags_content(TagKind::Word).iter().map(|tag| tag.to_string()).collect(),
+        })
     }
 }

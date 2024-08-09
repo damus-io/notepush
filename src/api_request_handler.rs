@@ -1,4 +1,5 @@
 use crate::nip98_auth;
+use crate::notification_manager::notification_manager::UserNotificationSettings;
 use crate::relay_connection::RelayConnection;
 use http_body_util::Full;
 use hyper::body::Buf;
@@ -9,48 +10,19 @@ use hyper_tungstenite;
 
 use http_body_util::BodyExt;
 use nostr;
+use serde_json::from_value;
 
 use crate::notification_manager::NotificationManager;
 use hyper::Method;
 use log;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::sync::Arc;
 use thiserror::Error;
-
-struct ParsedRequest {
-    uri: String,
-    method: Method,
-    body_bytes: Option<Vec<u8>>,
-    authorized_pubkey: nostr::PublicKey,
-}
-
-impl ParsedRequest {
-    fn body_json(&self) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
-        if let Some(body_bytes) = &self.body_bytes {
-            Ok(serde_json::from_slice(body_bytes)?)
-        } else {
-            Ok(json!({}))
-        }
-    }
-}
-
-struct APIResponse {
-    status: StatusCode,
-    body: Value,
-}
 
 pub struct APIHandler {
     notification_manager: Arc<NotificationManager>,
     base_url: String,
-}
-
-impl Clone for APIHandler {
-    fn clone(&self) -> Self {
-        APIHandler {
-            notification_manager: self.notification_manager.clone(),
-            base_url: self.base_url.clone(),
-        }
-    }
 }
 
 impl APIHandler {
@@ -60,6 +32,8 @@ impl APIHandler {
             base_url,
         }
     }
+    
+    // MARK: - HTTP handling
 
     pub async fn handle_http_request(
         &self,
@@ -185,22 +159,37 @@ impl APIHandler {
             authorized_pubkey,
         })
     }
+    
+    // MARK: - Router
 
     async fn handle_parsed_http_request(
         &self,
         parsed_request: &ParsedRequest,
     ) -> Result<APIResponse, Box<dyn std::error::Error>> {
-        match (&parsed_request.method, parsed_request.uri.as_str()) {
-            (&Method::POST, "/user-info") => self.handle_user_info(parsed_request).await,
-            (&Method::POST, "/user-info/remove") => {
-                self.handle_user_info_remove(parsed_request).await
-            }
-            _ => Ok(APIResponse {
-                status: StatusCode::NOT_FOUND,
-                body: json!({ "error": "Not found" }),
-            }),
+        
+        if let Some(url_params) = route_match(&Method::PUT, "/user-info/:pubkey/:deviceToken", &parsed_request) {
+            return self.handle_user_info(parsed_request, &url_params).await;
         }
+        
+        if let Some(url_params) = route_match(&Method::DELETE, "/user-info/:pubkey/:deviceToken", &parsed_request) {
+            return self.handle_user_info_remove(parsed_request, &url_params).await;
+        }
+        
+        if let Some(url_params) = route_match(&Method::GET, "/user-info/:pubkey/:deviceToken/preferences", &parsed_request) {
+            return self.get_user_settings(parsed_request, &url_params).await;
+        }
+        
+        if let Some(url_params) = route_match(&Method::PUT, "/user-info/:pubkey/:deviceToken/preferences", &parsed_request) {
+            return self.set_user_settings(parsed_request, &url_params).await;
+        }
+        
+        Ok(APIResponse {
+            status: StatusCode::NOT_FOUND,
+            body: json!({ "error": "Not found" }),
+        })
     }
+    
+    // MARK: - Authentication
 
     async fn authenticate(
         &self,
@@ -220,51 +209,283 @@ impl APIHandler {
         )
         .await)
     }
+    
+    // MARK: - Endpoint handlers
 
     async fn handle_user_info(
         &self,
         req: &ParsedRequest,
+        url_params: &HashMap<&str, String>,
     ) -> Result<APIResponse, Box<dyn std::error::Error>> {
-        let body = req.body_json()?;
-
-        if let Some(device_token) = body["deviceToken"].as_str() {
-            self.notification_manager.save_user_device_info(req.authorized_pubkey, device_token).await?;
-            return Ok(APIResponse {
-                status: StatusCode::OK,
-                body: json!({ "message": "User info saved successfully" }),
-            });
-        } else {
-            return Ok(APIResponse {
+        // Early return if `deviceToken` is missing
+        let device_token = match url_params.get("deviceToken") {
+            Some(token) => token,
+            None => return Ok(APIResponse {
                 status: StatusCode::BAD_REQUEST,
-                body: json!({ "error": "deviceToken is required" }),
+                body: json!({ "error": "deviceToken is required on the URL" }),
+            }),
+        };
+    
+        // Early return if `pubkey` is missing
+        let pubkey = match url_params.get("pubkey") {
+            Some(key) => key,
+            None => return Ok(APIResponse {
+                status: StatusCode::BAD_REQUEST,
+                body: json!({ "error": "pubkey is required on the URL" }),
+            }),
+        };
+        
+        // Validate the `pubkey` and prepare it for use
+        let pubkey = match nostr::PublicKey::from_hex(pubkey) {
+            Ok(key) => key,
+            Err(_) => return Ok(APIResponse {
+                status: StatusCode::BAD_REQUEST,
+                body: json!({ "error": "Invalid pubkey" }),
+            }),
+        };
+    
+        // Early return if `pubkey` does not match `req.authorized_pubkey`
+        if pubkey != req.authorized_pubkey {
+            return Ok(APIResponse {
+                status: StatusCode::FORBIDDEN,
+                body: json!({ "error": "Forbidden" }),
             });
         }
+        
+        // Proceed with the main logic after passing all checks
+        self.notification_manager.save_user_device_info(pubkey, device_token).await?;
+        Ok(APIResponse {
+            status: StatusCode::OK,
+            body: json!({ "message": "User info saved successfully" }),
+        })
     }
 
     async fn handle_user_info_remove(
         &self,
         req: &ParsedRequest,
+        url_params: &HashMap<&str, String>,
     ) -> Result<APIResponse, Box<dyn std::error::Error>> {
-        let body: Value = req.body_json()?;
-
-        if let Some(device_token) = body["deviceToken"].as_str() {
-            self.notification_manager.remove_user_device_info(req.authorized_pubkey, device_token).await?;
-            return Ok(APIResponse {
-                status: StatusCode::OK,
-                body: json!({ "message": "User info removed successfully" }),
-            });
-        } else {
-            return Ok(APIResponse {
+        // Early return if `deviceToken` is missing
+        let device_token = match url_params.get("deviceToken") {
+            Some(token) => token,
+            None => return Ok(APIResponse {
                 status: StatusCode::BAD_REQUEST,
-                body: json!({ "error": "deviceToken is required" }),
+                body: json!({ "error": "deviceToken is required on the URL" }),
+            }),
+        };
+        
+        // Early return if `pubkey` is missing
+        let pubkey = match url_params.get("pubkey") {
+            Some(key) => key,
+            None => return Ok(APIResponse {
+                status: StatusCode::BAD_REQUEST,
+                body: json!({ "error": "pubkey is required on the URL" }),
+            }),
+        };
+        
+        // Validate the `pubkey` and prepare it for use
+        let pubkey = match nostr::PublicKey::from_hex(pubkey) {
+            Ok(key) => key,
+            Err(_) => return Ok(APIResponse {
+                status: StatusCode::BAD_REQUEST,
+                body: json!({ "error": "Invalid pubkey" }),
+            }),
+        };
+        
+        // Early return if `pubkey` does not match `req.authorized_pubkey`
+        if pubkey != req.authorized_pubkey {
+            return Ok(APIResponse {
+                status: StatusCode::FORBIDDEN,
+                body: json!({ "error": "Forbidden" }),
             });
+        }
+        
+        // Proceed with the main logic after passing all checks
+        self.notification_manager.remove_user_device_info(pubkey, device_token).await?;
+        
+        Ok(APIResponse {
+            status: StatusCode::OK,
+            body: json!({ "message": "User info removed successfully" }),
+        })
+    }
+    
+    async fn set_user_settings(
+        &self,
+        req: &ParsedRequest,
+        url_params: &HashMap<&str, String>,
+    ) -> Result<APIResponse, Box<dyn std::error::Error>> {
+        // Early return if `deviceToken` is missing
+        let device_token = match url_params.get("deviceToken") {
+            Some(token) => token,
+            None => return Ok(APIResponse {
+                status: StatusCode::BAD_REQUEST,
+                body: json!({ "error": "deviceToken is required on the URL" }),
+            }),
+        };
+        
+        // Early return if `pubkey` is missing
+        let pubkey = match url_params.get("pubkey") {
+            Some(key) => key,
+            None => return Ok(APIResponse {
+                status: StatusCode::BAD_REQUEST,
+                body: json!({ "error": "pubkey is required on the URL" }),
+            }),
+        };
+        
+        // Validate the `pubkey` and prepare it for use
+        let pubkey = match nostr::PublicKey::from_hex(pubkey) {
+            Ok(key) => key,
+            Err(_) => return Ok(APIResponse {
+                status: StatusCode::BAD_REQUEST,
+                body: json!({ "error": "Invalid pubkey" }),
+            }),
+        };
+        
+        // Early return if `pubkey` does not match `req.authorized_pubkey`
+        if pubkey != req.authorized_pubkey {
+            return Ok(APIResponse {
+                status: StatusCode::FORBIDDEN,
+                body: json!({ "error": "Forbidden" }),
+            });
+        }
+        
+        // Proceed with the main logic after passing all checks
+        let body = req.body_json()?;
+
+        let settings: UserNotificationSettings = match from_value(body.clone()) {
+            Ok(settings) => settings,
+            Err(_) => {
+                return Ok(APIResponse {
+                    status: StatusCode::BAD_REQUEST,
+                    body: json!({ "error": "Invalid settings" }),
+                });
+            }
+        };
+        
+        self.notification_manager.save_user_notification_settings(&req.authorized_pubkey, device_token.to_string(), settings).await?;
+        return Ok(APIResponse {
+            status: StatusCode::OK,
+            body: json!({ "message": "User settings saved successfully" }),
+        });
+    }
+    
+    async fn get_user_settings(
+        &self,
+        req: &ParsedRequest,
+        url_params: &HashMap<&str, String>,
+    ) -> Result<APIResponse, Box<dyn std::error::Error>> {
+        // Early return if `deviceToken` is missing
+        let device_token = match url_params.get("deviceToken") {
+            Some(token) => token,
+            None => return Ok(APIResponse {
+                status: StatusCode::BAD_REQUEST,
+                body: json!({ "error": "deviceToken is required on the URL" }),
+            }),
+        };
+        
+        // Early return if `pubkey` is missing
+        let pubkey = match url_params.get("pubkey") {
+            Some(key) => key,
+            None => return Ok(APIResponse {
+                status: StatusCode::BAD_REQUEST,
+                body: json!({ "error": "pubkey is required on the URL" }),
+            }),
+        };
+        
+        // Validate the `pubkey` and prepare it for use
+        let pubkey = match nostr::PublicKey::from_hex(pubkey) {
+            Ok(key) => key,
+            Err(_) => return Ok(APIResponse {
+                status: StatusCode::BAD_REQUEST,
+                body: json!({ "error": "Invalid pubkey" }),
+            }),
+        };
+        
+        // Early return if `pubkey` does not match `req.authorized_pubkey`
+        if pubkey != req.authorized_pubkey {
+            return Ok(APIResponse {
+                status: StatusCode::FORBIDDEN,
+                body: json!({ "error": "Forbidden" }),
+            });
+        }
+        
+        // Proceed with the main logic after passing all checks
+        let settings = self.notification_manager.get_user_notification_settings(&req.authorized_pubkey, device_token.to_string()).await?;
+        
+        Ok(APIResponse {
+            status: StatusCode::OK,
+            body: json!(settings),
+        })
+    }
+}
+
+// MARK: - Extensions
+
+impl Clone for APIHandler {
+    fn clone(&self) -> Self {
+        APIHandler {
+            notification_manager: self.notification_manager.clone(),
+            base_url: self.base_url.clone(),
         }
     }
 }
+
+// MARK: - Helper types
 
 // Define enum error types including authentication error
 #[derive(Debug, Error)]
 enum APIError {
     #[error("Authentication error: {0}")]
     AuthenticationError(String),
+}
+
+struct ParsedRequest {
+    uri: String,
+    method: Method,
+    body_bytes: Option<Vec<u8>>,
+    authorized_pubkey: nostr::PublicKey,
+}
+
+impl ParsedRequest {
+    fn body_json(&self) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+        if let Some(body_bytes) = &self.body_bytes {
+            Ok(serde_json::from_slice(body_bytes)?)
+        } else {
+            Ok(json!({}))
+        }
+    }
+}
+
+struct APIResponse {
+    status: StatusCode,
+    body: Value,
+}
+
+// MARK: - Helper functions
+ 
+/// Matches the request to a specified route, returning a hashmap of the route parameters
+/// e.g. GET /user/:id/info route against request GET /user/123/info matches to { "id": "123" }
+fn route_match<'a>(method: &Method, path: &'a str, req: &ParsedRequest) -> Option<HashMap<&'a str, String>> {
+    if method != req.method {
+        return None;
+    }
+    let mut params = HashMap::new();
+    let path_segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    let req_segments: Vec<&str> = req.uri.split('/').filter(|s| !s.is_empty()).collect();
+
+    if path_segments.len() != req_segments.len() {
+        return None;
+    }
+
+    for (i, segment) in path_segments.iter().enumerate() {
+        if segment.starts_with(':') {
+            let key = &segment[1..];
+            let value = req_segments[i].to_string();
+            params.insert(key, value);
+        } else if segment != &req_segments[i] {
+            return None;
+        }
+    }
+
+    Some(params)
 }

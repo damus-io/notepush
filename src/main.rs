@@ -12,6 +12,7 @@ mod notepush_env;
 use notepush_env::NotePushEnv;
 mod api_request_handler;
 mod nip98_auth;
+mod utils;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
