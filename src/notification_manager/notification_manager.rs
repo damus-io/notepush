@@ -207,13 +207,20 @@ impl NotificationManager {
     ) -> Result<HashSet<nostr::PublicKey>, Box<dyn std::error::Error>> {
         let notification_status = self.get_notification_status(event).await?;
         let relevant_pubkeys = self.pubkeys_relevant_to_event(event).await?;
+        let mut relevant_pubkeys_that_are_registered = HashSet::new();
+        for pubkey in relevant_pubkeys {
+            if self.is_pubkey_registered(&pubkey).await? {
+                relevant_pubkeys_that_are_registered.insert(pubkey);
+            }
+        }
         let pubkeys_that_received_notification =
             notification_status.pubkeys_that_received_notification();
-        let relevant_pubkeys_yet_to_receive: HashSet<PublicKey> = relevant_pubkeys
+        let relevant_pubkeys_yet_to_receive: HashSet<PublicKey> = relevant_pubkeys_that_are_registered
             .difference(&pubkeys_that_received_notification)
             .filter(|&x| *x != event.pubkey)
             .cloned()
             .collect();
+        
 
         let mut pubkeys_to_notify = HashSet::new();
         for pubkey in relevant_pubkeys_yet_to_receive {
@@ -297,6 +304,13 @@ impl NotificationManager {
             Kind::ZapReceipt => Ok(notification_preferences.zap_notifications_enabled),
             _ => Ok(false),
         }
+    }
+    
+    async fn is_pubkey_registered(
+        &self,
+        pubkey: &PublicKey,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        Ok(!self.get_user_device_tokens(pubkey).await?.is_empty())
     }
 
     async fn get_user_device_tokens(
