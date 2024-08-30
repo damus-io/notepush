@@ -379,7 +379,11 @@ impl NotificationManager {
         
 
         let apns_client_mutex_guard = self.apns_client.lock().await;
-        let _response = apns_client_mutex_guard.send(payload).await?;
+        
+        match apns_client_mutex_guard.send(payload).await {
+            Ok(_response) => {},
+            Err(e) => log::error!("Failed to send notification to device token '{}': {}", device_token, e),
+        }
 
         log::info!("Notification sent to device token: {}", device_token);
 
