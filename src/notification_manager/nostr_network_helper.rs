@@ -6,7 +6,6 @@ use super::nostr_event_cache::Cache;
 use tokio::time::{timeout, Duration};
 
 const NOTE_FETCH_TIMEOUT: Duration = Duration::from_secs(5);
-const CACHE_MAX_AGE: Duration = Duration::from_secs(60);
 
 pub struct NostrNetworkHelper {
     client: Client,
@@ -16,12 +15,15 @@ pub struct NostrNetworkHelper {
 impl NostrNetworkHelper {
     // MARK: - Initialization
 
-    pub async fn new(relay_url: String) -> Result<Self, Box<dyn std::error::Error>> {
+    pub async fn new(relay_url: String, cache_max_age: Duration) -> Result<Self, Box<dyn std::error::Error>> {
         let client = Client::new(&Keys::generate());
         client.add_relay(relay_url.clone()).await?;
         client.connect().await;
         
-        Ok(NostrNetworkHelper { client, cache: Mutex::new(Cache::new(CACHE_MAX_AGE)) })
+        Ok(NostrNetworkHelper { 
+            client,
+            cache: Mutex::new(Cache::new(cache_max_age)),
+        })
     }
 
     // MARK: - Answering questions about a user

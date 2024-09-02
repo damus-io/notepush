@@ -41,6 +41,7 @@ impl NotificationManager {
         apns_team_id: String,
         apns_environment: a2::client::Endpoint,
         apns_topic: String,
+        cache_max_age: std::time::Duration,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let connection = db.get()?;
         Self::setup_database(&connection)?;
@@ -58,7 +59,7 @@ impl NotificationManager {
             apns_topic,
             apns_client: Mutex::new(client),
             db: Mutex::new(db),
-            nostr_network_helper: NostrNetworkHelper::new(relay_url.clone()).await?,
+            nostr_network_helper: NostrNetworkHelper::new(relay_url.clone(), cache_max_age).await?,
         })
     }
 
