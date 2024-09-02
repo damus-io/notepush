@@ -97,8 +97,15 @@ impl Cache {
         if let Some(entry) = self.mute_lists.get(pubkey) {
             let entry = entry.clone();  // Clone the Arc to avoid borrowing issues
             if !entry.is_expired(self.max_age) {
-                if let Some(event) = entry.event.clone() {
-                    return Ok(event.to_mute_list());
+                match &entry.event {
+                    Some(event) => {
+                        log::debug!("Cached mute list for pubkey {} was found", pubkey.to_hex());
+                        return Ok(event.to_mute_list());
+                    }
+                    None => {
+                        log::debug!("Empty mute list cache entry for pubkey {}", pubkey.to_hex());
+                        return Ok(None);
+                    }
                 }
             } else {
                 log::debug!("Mute list for pubkey {} is expired, removing it from the cache", pubkey.to_hex());
@@ -106,6 +113,7 @@ impl Cache {
                 self.remove_event_from_all_maps(&entry.event);
             }
         }
+        log::debug!("Mute list for pubkey {} not found on cache", pubkey.to_hex());
         Err(CacheError::NotFound)
     }
 
