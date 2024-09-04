@@ -406,6 +406,17 @@ impl NotificationManager {
     }
     
     // MARK: - User device info and settings
+    
+    pub async fn save_user_device_info_if_not_present(
+        &self,
+        pubkey: nostr::PublicKey,
+        device_token: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if self.is_pubkey_registered(&pubkey).await? {
+            return Ok(());
+        }
+        self.save_user_device_info(pubkey, device_token).await
+    }
 
     pub async fn save_user_device_info(
         &self,

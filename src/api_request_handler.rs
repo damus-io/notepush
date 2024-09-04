@@ -253,7 +253,7 @@ impl APIHandler {
         }
         
         // Proceed with the main logic after passing all checks
-        self.notification_manager.save_user_device_info(pubkey, device_token).await?;
+        self.notification_manager.save_user_device_info_if_not_present(pubkey, device_token).await?;
         Ok(APIResponse {
             status: StatusCode::OK,
             body: json!({ "message": "User info saved successfully" }),
