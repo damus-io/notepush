@@ -41,6 +41,7 @@ impl NotificationManager {
         apns_team_id: String,
         apns_environment: a2::client::Endpoint,
         apns_topic: String,
+        cache_max_age: std::time::Duration,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let connection = db.get()?;
         Self::setup_database(&connection)?;
@@ -58,7 +59,7 @@ impl NotificationManager {
             apns_topic,
             apns_client: Mutex::new(client),
             db: Mutex::new(db),
-            nostr_network_helper: NostrNetworkHelper::new(relay_url.clone()).await?,
+            nostr_network_helper: NostrNetworkHelper::new(relay_url.clone(), cache_max_age).await?,
         })
     }
 
@@ -379,7 +380,11 @@ impl NotificationManager {
         
 
         let apns_client_mutex_guard = self.apns_client.lock().await;
-        let _response = apns_client_mutex_guard.send(payload).await?;
+        
+        match apns_client_mutex_guard.send(payload).await {
+            Ok(_response) => {},
+            Err(e) => log::error!("Failed to send notification to device token '{}': {}", device_token, e),
+        }
 
         log::info!("Notification sent to device token: {}", device_token);
 
@@ -392,7 +397,16 @@ impl NotificationManager {
             nostr_sdk::Kind::TextNote => ("New activity".to_string(), event.content.clone()),
             nostr_sdk::Kind::EncryptedDirectMessage => ("New direct message".to_string(), "Contents are encrypted".to_string()),
             nostr_sdk::Kind::Repost => ("Someone reposted".to_string(), event.content.clone()),
-            nostr_sdk::Kind::Reaction => ("New reaction".to_string(), event.content.clone()),
+            nostr_sdk::Kind::Reaction => {
+                let content_text = event.content.clone();
+                let formatted_text = match content_text.as_str() {
+                    "" => "❤️",
+                    "+" => "❤️",
+                    "-" => "👎",
+                    _ => content_text.as_str(),
+                };
+                ("New reaction".to_string(), formatted_text.to_string())
+            },
             nostr_sdk::Kind::ZapPrivateMessage => ("New zap private message".to_string(), "Contents are encrypted".to_string()),
             nostr_sdk::Kind::ZapReceipt => ("Someone zapped you".to_string(), "".to_string()),
             _ => ("New activity".to_string(), "".to_string()),
@@ -401,6 +415,17 @@ impl NotificationManager {
     }
     
     // MARK: - User device info and settings
+    
+    pub async fn save_user_device_info_if_not_present(
+        &self,
+        pubkey: nostr::PublicKey,
+        device_token: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if self.is_pubkey_registered(&pubkey).await? {
+            return Ok(());
+        }
+        self.save_user_device_info(pubkey, device_token).await
+    }
 
     pub async fn save_user_device_info(
         &self,
