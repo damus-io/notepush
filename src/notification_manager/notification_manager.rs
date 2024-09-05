@@ -397,7 +397,16 @@ impl NotificationManager {
             nostr_sdk::Kind::TextNote => ("New activity".to_string(), event.content.clone()),
             nostr_sdk::Kind::EncryptedDirectMessage => ("New direct message".to_string(), "Contents are encrypted".to_string()),
             nostr_sdk::Kind::Repost => ("Someone reposted".to_string(), event.content.clone()),
-            nostr_sdk::Kind::Reaction => ("New reaction".to_string(), event.content.clone()),
+            nostr_sdk::Kind::Reaction => {
+                let content_text = event.content.clone();
+                let formatted_text = match content_text.as_str() {
+                    "" => "❤️",
+                    "+" => "❤️",
+                    "-" => "👎",
+                    _ => content_text.as_str(),
+                };
+                ("New reaction".to_string(), formatted_text.to_string())
+            },
             nostr_sdk::Kind::ZapPrivateMessage => ("New zap private message".to_string(), "Contents are encrypted".to_string()),
             nostr_sdk::Kind::ZapReceipt => ("Someone zapped you".to_string(), "".to_string()),
             _ => ("New activity".to_string(), "".to_string()),
