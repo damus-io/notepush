@@ -307,6 +307,15 @@ impl NotificationManager {
         }
     }
     
+    async fn is_pubkey_token_pair_registered(
+        &self,
+        pubkey: &PublicKey,
+        device_token: &str,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        let current_device_tokens = self.get_user_device_tokens(pubkey).await?;
+        Ok(current_device_tokens.contains(&device_token.to_string()))
+    }
+    
     async fn is_pubkey_registered(
         &self,
         pubkey: &PublicKey,
@@ -421,7 +430,7 @@ impl NotificationManager {
         pubkey: nostr::PublicKey,
         device_token: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        if self.is_pubkey_registered(&pubkey).await? {
+        if self.is_pubkey_token_pair_registered(&pubkey, &device_token).await? {
             return Ok(());
         }
         self.save_user_device_info(pubkey, device_token).await
