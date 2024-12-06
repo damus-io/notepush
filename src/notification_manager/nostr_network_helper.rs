@@ -1,9 +1,9 @@
-use tokio::sync::Mutex;
+use super::nostr_event_cache::Cache;
 use super::nostr_event_extensions::{RelayList, TimestampedMuteList};
 use super::notification_manager::EventSaver;
 use super::ExtendedEvent;
 use nostr_sdk::prelude::*;
-use super::nostr_event_cache::Cache;
+use tokio::sync::Mutex;
 use tokio::time::{timeout, Duration};
 
 const NOTE_FETCH_TIMEOUT: Duration = Duration::from_secs(5);
@@ -11,13 +11,17 @@ const NOTE_FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 pub struct NostrNetworkHelper {
     bootstrap_client: Client,
     cache: Mutex<Cache>,
-    event_saver: EventSaver
+    event_saver: EventSaver,
 }
 
 impl NostrNetworkHelper {
     // MARK: - Initialization
 
-    pub async fn new(relay_url: String, cache_max_age: Duration, event_saver: EventSaver) -> Result<Self, Box<dyn std::error::Error>> {
+    pub async fn new(
+        relay_url: String,
+        cache_max_age: Duration,
+        event_saver: EventSaver,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let client = Client::new(&Keys::generate());
         client.add_relay(relay_url.clone()).await?;
         client.connect().await;
@@ -54,7 +58,7 @@ impl NostrNetworkHelper {
             if let Ok(optional_mute_list) = cache_mutex_guard.get_mute_list(pubkey) {
                 return optional_mute_list;
             }
-        }   // Release the lock here for improved performance
+        } // Release the lock here for improved performance
 
         // We don't have an answer from the cache, so we need to fetch it
         let mute_list_event = self.fetch_single_event(pubkey, Kind::MuteList).await;
@@ -69,10 +73,15 @@ impl NostrNetworkHelper {
             if let Ok(optional_relay_list) = cache_mutex_guard.get_relay_list(pubkey) {
                 return optional_relay_list;
             }
-        }   // Release the lock here for improved performance
+        } // Release the lock here for improved performance
 
         // We don't have an answer from the cache, so we need to fetch it
-        let relay_list_event = NostrNetworkHelper::fetch_single_event_from_client(pubkey, Kind::RelayList, &self.bootstrap_client).await;
+        let relay_list_event = NostrNetworkHelper::fetch_single_event_from_client(
+            pubkey,
+            Kind::RelayList,
+            &self.bootstrap_client,
+        )
+        .await;
         let mut cache_mutex_guard = self.cache.lock().await;
         cache_mutex_guard.add_optional_relay_list_with_author(pubkey, relay_list_event.as_ref());
         cache_mutex_guard.get_relay_list(pubkey).ok()?
@@ -84,12 +93,13 @@ impl NostrNetworkHelper {
             if let Ok(optional_contact_list) = cache_mutex_guard.get_contact_list(pubkey) {
                 return optional_contact_list;
             }
-        }   // Release the lock here for improved performance
+        } // Release the lock here for improved performance
 
         // We don't have an answer from the cache, so we need to fetch it
         let contact_list_event = self.fetch_single_event(pubkey, Kind::ContactList).await;
         let mut cache_mutex_guard = self.cache.lock().await;
-        cache_mutex_guard.add_optional_contact_list_with_author(pubkey, contact_list_event.as_ref());
+        cache_mutex_guard
+            .add_optional_contact_list_with_author(pubkey, contact_list_event.as_ref());
         cache_mutex_guard.get_contact_list(pubkey).ok()?
     }
 
@@ -99,15 +109,24 @@ impl NostrNetworkHelper {
         let event = match self.make_client_for(author).await {
             Some(client) => {
                 NostrNetworkHelper::fetch_single_event_from_client(author, kind, &client).await
-            },
+            }
             None => {
-                NostrNetworkHelper::fetch_single_event_from_client(author, kind, &self.bootstrap_client).await
-            },
+                NostrNetworkHelper::fetch_single_event_from_client(
+                    author,
+                    kind,
+                    &self.bootstrap_client,
+                )
+                .await
+            }
         };
         // Save event to our database if needed
         if let Some(event) = event.clone() {
             if let Err(error) = self.event_saver.save_if_needed(&event).await {
-                log::warn!("Failed to save event '{:?}'. Error: {:?}", event.id.to_hex(), error)
+                log::warn!(
+                    "Failed to save event '{:?}'. Error: {:?}",
+                    event.id.to_hex(),
+                    error
+                )
             }
         }
         event
@@ -118,7 +137,8 @@ impl NostrNetworkHelper {
 
         let relay_list = self.get_relay_list(author).await?;
         for (url, metadata) in relay_list {
-            if metadata.map_or(true, |m| m == RelayMetadata::Write) {   // Only add "write" relays, as per NIP-65 spec on reading data FROM user
+            if metadata.map_or(true, |m| m == RelayMetadata::Write) {
+                // Only add "write" relays, as per NIP-65 spec on reading data FROM user
                 if let Err(e) = client.add_relay(url.clone()).await {
                     log::warn!("Failed to add relay URL: {:?}, error: {:?}", url, e);
                 }
@@ -130,7 +150,11 @@ impl NostrNetworkHelper {
         Some(client)
     }
 
-    async fn fetch_single_event_from_client(author: &PublicKey, kind: Kind, client: &Client) -> Option<Event> {
+    async fn fetch_single_event_from_client(
+        author: &PublicKey,
+        kind: Kind,
+        client: &Client,
+    ) -> Option<Event> {
         let subscription_filter = Filter::new()
             .kinds(vec![kind])
             .authors(vec![author.clone()])

@@ -10,10 +10,10 @@ use rusqlite;
 use rusqlite::params;
 use serde::Deserialize;
 use serde::Serialize;
-use tokio::sync::Mutex;
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio;
+use tokio::sync::Mutex;
 
 use super::nostr_event_extensions::Codable;
 use super::nostr_event_extensions::MaybeConvertibleToMuteList;
@@ -34,12 +34,12 @@ pub struct NotificationManager {
     apns_topic: String,
     apns_client: Mutex<Client>,
     nostr_network_helper: NostrNetworkHelper,
-    pub event_saver: EventSaver
+    pub event_saver: EventSaver,
 }
 
 #[derive(Clone)]
 pub struct EventSaver {
-    db: Arc<Mutex<r2d2::Pool<SqliteConnectionManager>>>
+    db: Arc<Mutex<r2d2::Pool<SqliteConnectionManager>>>,
 }
 
 impl EventSaver {
@@ -47,33 +47,47 @@ impl EventSaver {
         Self { db }
     }
 
-    pub async fn save_if_needed(&self, event: &nostr::Event) -> Result<bool, Box<dyn std::error::Error>> {
+    pub async fn save_if_needed(
+        &self,
+        event: &nostr::Event,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
         match event.to_mute_list() {
             Some(mute_list) => {
-                match self.get_saved_mute_list_for(event.author()).await.ok().flatten() {
+                match self
+                    .get_saved_mute_list_for(event.author())
+                    .await
+                    .ok()
+                    .flatten()
+                {
                     Some(timestamped_mute_list) => {
                         let timestamp = timestamped_mute_list.timestamp;
                         let mute_list = timestamped_mute_list.mute_list;
                         if timestamp < event.created_at() {
-                            self.save_mute_list(event.author(), mute_list, event.created_at).await?;
+                            self.save_mute_list(event.author(), mute_list, event.created_at)
+                                .await?;
+                        } else {
+                            return Ok(false);
                         }
-                        else {
-                            return Ok(false)
-                        }
-                    },
+                    }
                     None => {
-                        self.save_mute_list(event.author(), mute_list, event.created_at).await?;
+                        self.save_mute_list(event.author(), mute_list, event.created_at)
+                            .await?;
                     }
                 }
                 Ok(true)
-            },
+            }
             None => Ok(false),
         }
     }
 
     // MARK: - Muting preferences
 
-    pub async fn save_mute_list(&self, pubkey: PublicKey, mute_list: MuteList, created_at: Timestamp) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn save_mute_list(
+        &self,
+        pubkey: PublicKey,
+        mute_list: MuteList,
+        created_at: Timestamp,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let mute_list_json = mute_list.to_json()?;
         let db_mutex_guard = self.db.lock().await;
         let connection = db_mutex_guard.get()?;
@@ -90,7 +104,10 @@ impl EventSaver {
         Ok(())
     }
 
-    pub async fn get_saved_mute_list_for(&self, pubkey: PublicKey) -> Result<Option<TimestampedMuteList>, Box<dyn std::error::Error>> {
+    pub async fn get_saved_mute_list_for(
+        &self,
+        pubkey: PublicKey,
+    ) -> Result<Option<TimestampedMuteList>, Box<dyn std::error::Error>> {
         let db_mutex_guard = self.db.lock().await;
         let connection = db_mutex_guard.get()?;
 
@@ -98,7 +115,10 @@ impl EventSaver {
             "SELECT mute_list, created_at FROM muting_preferences WHERE user_pubkey = ?",
         )?;
 
-        let mute_list_info: (serde_json::Value, nostr::Timestamp) = match stmt.query_row([pubkey.to_sql_string()], |row| { Ok((row.get(0)?, row.get(1)?)) }) {
+        let mute_list_info: (serde_json::Value, nostr::Timestamp) = match stmt
+            .query_row([pubkey.to_sql_string()], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            }) {
             Ok(info) => (info.0, nostr::Timestamp::from_sql_string(info.1)?),
             Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
             Err(e) => return Err(e.into()),
@@ -107,7 +127,7 @@ impl EventSaver {
         let mute_list = MuteList::from_json(mute_list_info.0)?;
         let timestamped_mute_list = TimestampedMuteList {
             mute_list,
-            timestamp: mute_list_info.1
+            timestamp: mute_list_info.1,
         };
 
         Ok(Some(timestamped_mute_list))
@@ -146,7 +166,12 @@ impl NotificationManager {
             db,
             apns_topic,
             apns_client: Mutex::new(client),
-            nostr_network_helper: NostrNetworkHelper::new(relay_url.clone(), cache_max_age, event_saver.clone()).await?,
+            nostr_network_helper: NostrNetworkHelper::new(
+                relay_url.clone(),
+                cache_max_age,
+                event_saver.clone(),
+            )
+            .await?,
             event_saver,
         };
 
@@ -192,12 +217,48 @@ impl NotificationManager {
 
         // Notification settings migration (https://github.com/damus-io/damus/issues/2360)
 
-        Self::add_column_if_not_exists(&db, "user_info", "zap_notifications_enabled", "BOOLEAN", Some("true"))?;
-        Self::add_column_if_not_exists(&db, "user_info", "mention_notifications_enabled", "BOOLEAN", Some("true"))?;
-        Self::add_column_if_not_exists(&db, "user_info", "repost_notifications_enabled", "BOOLEAN", Some("true"))?;
-        Self::add_column_if_not_exists(&db, "user_info", "reaction_notifications_enabled", "BOOLEAN", Some("true"))?;
-        Self::add_column_if_not_exists(&db, "user_info", "dm_notifications_enabled", "BOOLEAN", Some("true"))?;
-        Self::add_column_if_not_exists(&db, "user_info", "only_notifications_from_following_enabled", "BOOLEAN", Some("false"))?;
+        Self::add_column_if_not_exists(
+            &db,
+            "user_info",
+            "zap_notifications_enabled",
+            "BOOLEAN",
+            Some("true"),
+        )?;
+        Self::add_column_if_not_exists(
+            &db,
+            "user_info",
+            "mention_notifications_enabled",
+            "BOOLEAN",
+            Some("true"),
+        )?;
+        Self::add_column_if_not_exists(
+            &db,
+            "user_info",
+            "repost_notifications_enabled",
+            "BOOLEAN",
+            Some("true"),
+        )?;
+        Self::add_column_if_not_exists(
+            &db,
+            "user_info",
+            "reaction_notifications_enabled",
+            "BOOLEAN",
+            Some("true"),
+        )?;
+        Self::add_column_if_not_exists(
+            &db,
+            "user_info",
+            "dm_notifications_enabled",
+            "BOOLEAN",
+            Some("true"),
+        )?;
+        Self::add_column_if_not_exists(
+            &db,
+            "user_info",
+            "only_notifications_from_following_enabled",
+            "BOOLEAN",
+            Some("false"),
+        )?;
 
         // Migration related to mute list improvements (https://github.com/damus-io/damus/issues/2118)
 
@@ -230,7 +291,10 @@ impl NotificationManager {
         if !column_names.contains(&column_name.to_string()) {
             let query = format!(
                 "ALTER TABLE {} ADD COLUMN {} {} {}",
-                table_name, column_name, column_type, match default_value {
+                table_name,
+                column_name,
+                column_type,
+                match default_value {
                     Some(value) => format!("DEFAULT {}", value),
                     None => "".to_string(),
                 },
@@ -317,12 +381,12 @@ impl NotificationManager {
         }
         let pubkeys_that_received_notification =
             notification_status.pubkeys_that_received_notification();
-        let relevant_pubkeys_yet_to_receive: HashSet<PublicKey> = relevant_pubkeys_that_are_registered
-            .difference(&pubkeys_that_received_notification)
-            .filter(|&x| *x != event.pubkey)
-            .cloned()
-            .collect();
-
+        let relevant_pubkeys_yet_to_receive: HashSet<PublicKey> =
+            relevant_pubkeys_that_are_registered
+                .difference(&pubkeys_that_received_notification)
+                .filter(|&x| *x != event.pubkey)
+                .cloned()
+                .collect();
 
         let mut pubkeys_to_notify = HashSet::new();
         for pubkey in relevant_pubkeys_yet_to_receive {
@@ -338,39 +402,49 @@ impl NotificationManager {
     }
 
     async fn should_mute_notification_for_pubkey(&self, event: &Event, pubkey: &PublicKey) -> bool {
-        let latest_mute_list = self.get_newest_mute_list_available(pubkey).await.ok().flatten();
+        let latest_mute_list = self
+            .get_newest_mute_list_available(pubkey)
+            .await
+            .ok()
+            .flatten();
         if let Some(latest_mute_list) = latest_mute_list {
-            return should_mute_notification_for_mutelist(event, &latest_mute_list)
+            return should_mute_notification_for_mutelist(event, &latest_mute_list);
         }
-        return false
+        return false;
     }
 
-    async fn get_newest_mute_list_available(&self, pubkey: &PublicKey) -> Result<Option<MuteList>, Box<dyn std::error::Error>> {
+    async fn get_newest_mute_list_available(
+        &self,
+        pubkey: &PublicKey,
+    ) -> Result<Option<MuteList>, Box<dyn std::error::Error>> {
         let timestamped_saved_mute_list = self.event_saver.get_saved_mute_list_for(*pubkey).await?;
-        let timestamped_network_mute_list = self.nostr_network_helper.get_public_mute_list(pubkey).await;
-        Ok(match (timestamped_saved_mute_list, timestamped_network_mute_list) {
-            (Some(local_mute), Some(network_mute)) => {
-                if local_mute.timestamp > network_mute.timestamp {
-                    log::debug!("Mute lists available in both database and from the network for pubkey {}. Using local mute list since it's newer.", pubkey.to_hex());
+        let timestamped_network_mute_list =
+            self.nostr_network_helper.get_public_mute_list(pubkey).await;
+        Ok(
+            match (timestamped_saved_mute_list, timestamped_network_mute_list) {
+                (Some(local_mute), Some(network_mute)) => {
+                    if local_mute.timestamp > network_mute.timestamp {
+                        log::debug!("Mute lists available in both database and from the network for pubkey {}. Using local mute list since it's newer.", pubkey.to_hex());
+                        Some(local_mute.mute_list)
+                    } else {
+                        log::debug!("Mute lists available in both database and from the network for pubkey {}. Using network mute list since it's newer.", pubkey.to_hex());
+                        Some(network_mute.mute_list)
+                    }
+                }
+                (Some(local_mute), None) => {
+                    log::debug!("Mute list available in database for pubkey {}, but not from the network. Using local mute list.", pubkey.to_hex());
                     Some(local_mute.mute_list)
-                } else {
-                    log::debug!("Mute lists available in both database and from the network for pubkey {}. Using network mute list since it's newer.", pubkey.to_hex());
+                }
+                (None, Some(network_mute)) => {
+                    log::debug!("Mute list for pubkey {} available from the network, but not in the database. Using network mute list.", pubkey.to_hex());
                     Some(network_mute.mute_list)
                 }
+                (None, None) => {
+                    log::debug!("No mute list available for pubkey {}", pubkey.to_hex());
+                    None
+                }
             },
-            (Some(local_mute), None) => {
-                log::debug!("Mute list available in database for pubkey {}, but not from the network. Using local mute list.", pubkey.to_hex());
-                Some(local_mute.mute_list)
-            },
-            (None, Some(network_mute)) => {
-                log::debug!("Mute list for pubkey {} available from the network, but not in the database. Using network mute list.", pubkey.to_hex());
-                Some(network_mute.mute_list)
-            },
-            (None, None) => {
-                log::debug!("No mute list available for pubkey {}", pubkey.to_hex());
-                None
-            },
-        })
+        )
     }
 
     async fn pubkeys_relevant_to_event(
@@ -380,8 +454,9 @@ impl NotificationManager {
         let mut relevant_pubkeys = event.relevant_pubkeys();
         let referenced_event_ids = event.referenced_event_ids();
         for referenced_event_id in referenced_event_ids {
-            let pubkeys_relevant_to_referenced_event =
-                self.pubkeys_subscribed_to_event_id(&referenced_event_id).await?;
+            let pubkeys_relevant_to_referenced_event = self
+                .pubkeys_subscribed_to_event_id(&referenced_event_id)
+                .await?;
             relevant_pubkeys.extend(pubkeys_relevant_to_referenced_event);
         }
         Ok(relevant_pubkeys)
@@ -409,7 +484,10 @@ impl NotificationManager {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let user_device_tokens = self.get_user_device_tokens(pubkey).await?;
         for device_token in user_device_tokens {
-            if !self.user_wants_notification(pubkey, device_token.clone(), event).await? {
+            if !self
+                .user_wants_notification(pubkey, device_token.clone(), event)
+                .await?
+            {
                 continue;
             }
             self.send_event_notification_to_device_token(event, &device_token)
@@ -424,14 +502,20 @@ impl NotificationManager {
         device_token: String,
         event: &Event,
     ) -> Result<bool, Box<dyn std::error::Error>> {
-        let notification_preferences = self.get_user_notification_settings(pubkey, device_token).await?;
+        let notification_preferences = self
+            .get_user_notification_settings(pubkey, device_token)
+            .await?;
         if notification_preferences.only_notifications_from_following_enabled {
-            if !self.nostr_network_helper.does_pubkey_follow_pubkey(pubkey, &event.author()).await {
+            if !self
+                .nostr_network_helper
+                .does_pubkey_follow_pubkey(pubkey, &event.author())
+                .await
+            {
                 return Ok(false);
             }
         }
         match event.kind {
-            Kind::TextNote => Ok(notification_preferences.mention_notifications_enabled),   // TODO: Not 100% accurate
+            Kind::TextNote => Ok(notification_preferences.mention_notifications_enabled), // TODO: Not 100% accurate
             Kind::EncryptedDirectMessage => Ok(notification_preferences.dm_notifications_enabled),
             Kind::Repost => Ok(notification_preferences.repost_notifications_enabled),
             Kind::GenericRepost => Ok(notification_preferences.repost_notifications_enabled),
@@ -521,14 +605,20 @@ impl NotificationManager {
             .build(device_token, Default::default());
 
         payload.options.apns_topic = Some(self.apns_topic.as_str());
-        payload.data.insert("nostr_event", serde_json::Value::String(event.try_as_json()?));
-
+        payload.data.insert(
+            "nostr_event",
+            serde_json::Value::String(event.try_as_json()?),
+        );
 
         let apns_client_mutex_guard = self.apns_client.lock().await;
 
         match apns_client_mutex_guard.send(payload).await {
-            Ok(_response) => {},
-            Err(e) => log::error!("Failed to send notification to device token '{}': {}", device_token, e),
+            Ok(_response) => {}
+            Err(e) => log::error!(
+                "Failed to send notification to device token '{}': {}",
+                device_token,
+                e
+            ),
         }
 
         log::info!("Notification sent to device token: {}", device_token);
@@ -540,7 +630,10 @@ impl NotificationManager {
         // NOTE: This is simple because the client will handle formatting. These are just fallbacks.
         let (title, body) = match event.kind {
             nostr_sdk::Kind::TextNote => ("New activity".to_string(), event.content.clone()),
-            nostr_sdk::Kind::EncryptedDirectMessage => ("New direct message".to_string(), "Contents are encrypted".to_string()),
+            nostr_sdk::Kind::EncryptedDirectMessage => (
+                "New direct message".to_string(),
+                "Contents are encrypted".to_string(),
+            ),
             nostr_sdk::Kind::Repost => ("Someone reposted".to_string(), event.content.clone()),
             nostr_sdk::Kind::Reaction => {
                 let content_text = event.content.clone();
@@ -551,8 +644,11 @@ impl NotificationManager {
                     _ => content_text.as_str(),
                 };
                 ("New reaction".to_string(), formatted_text.to_string())
-            },
-            nostr_sdk::Kind::ZapPrivateMessage => ("New zap private message".to_string(), "Contents are encrypted".to_string()),
+            }
+            nostr_sdk::Kind::ZapPrivateMessage => (
+                "New zap private message".to_string(),
+                "Contents are encrypted".to_string(),
+            ),
             nostr_sdk::Kind::ZapReceipt => ("Someone zapped you".to_string(), "".to_string()),
             _ => ("New activity".to_string(), "".to_string()),
         };
@@ -566,7 +662,10 @@ impl NotificationManager {
         pubkey: nostr::PublicKey,
         device_token: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        if self.is_pubkey_token_pair_registered(&pubkey, &device_token).await? {
+        if self
+            .is_pubkey_token_pair_registered(&pubkey, &device_token)
+            .await?
+        {
             return Ok(());
         }
         self.save_user_device_info(pubkey, device_token).await
@@ -614,17 +713,16 @@ impl NotificationManager {
         let mut stmt = connection.prepare(
             "SELECT zap_notifications_enabled, mention_notifications_enabled, repost_notifications_enabled, reaction_notifications_enabled, dm_notifications_enabled, only_notifications_from_following_enabled FROM user_info WHERE pubkey = ? AND device_token = ?",
         )?;
-        let settings = stmt
-            .query_row([pubkey.to_sql_string(), device_token], |row| {
-                Ok(UserNotificationSettings {
-                    zap_notifications_enabled: row.get(0)?,
-                    mention_notifications_enabled: row.get(1)?,
-                    repost_notifications_enabled: row.get(2)?,
-                    reaction_notifications_enabled: row.get(3)?,
-                    dm_notifications_enabled: row.get(4)?,
-                    only_notifications_from_following_enabled: row.get(5)?,
-                })
-            })?;
+        let settings = stmt.query_row([pubkey.to_sql_string(), device_token], |row| {
+            Ok(UserNotificationSettings {
+                zap_notifications_enabled: row.get(0)?,
+                mention_notifications_enabled: row.get(1)?,
+                repost_notifications_enabled: row.get(2)?,
+                reaction_notifications_enabled: row.get(3)?,
+                dm_notifications_enabled: row.get(4)?,
+                only_notifications_from_following_enabled: row.get(5)?,
+            })
+        })?;
 
         Ok(settings)
     }
@@ -661,7 +759,7 @@ pub struct UserNotificationSettings {
     repost_notifications_enabled: bool,
     reaction_notifications_enabled: bool,
     dm_notifications_enabled: bool,
-    only_notifications_from_following_enabled: bool
+    only_notifications_from_following_enabled: bool,
 }
 
 struct NotificationStatus {

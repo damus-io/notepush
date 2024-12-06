@@ -54,7 +54,9 @@ impl NotePushEnv {
             .unwrap_or(DEFAULT_NOSTR_EVENT_CACHE_MAX_AGE.to_string())
             .parse::<u64>()
             .map(|s| std::time::Duration::from_secs(s))
-            .unwrap_or(std::time::Duration::from_secs(DEFAULT_NOSTR_EVENT_CACHE_MAX_AGE));
+            .unwrap_or(std::time::Duration::from_secs(
+                DEFAULT_NOSTR_EVENT_CACHE_MAX_AGE,
+            ));
 
         Ok(NotePushEnv {
             apns_private_key_path,
@@ -67,7 +69,7 @@ impl NotePushEnv {
             port,
             api_base_url,
             relay_url,
-            nostr_event_cache_max_age
+            nostr_event_cache_max_age,
         })
     }
 

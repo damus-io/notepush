@@ -1,4 +1,10 @@
-use nostr::{self, key::PublicKey, nips::{nip51::MuteList, nip65}, Alphabet, SingleLetterTag, TagKind::SingleLetter};
+use nostr::{
+    self,
+    key::PublicKey,
+    nips::{nip51::MuteList, nip65},
+    Alphabet, SingleLetterTag,
+    TagKind::SingleLetter,
+};
 use nostr_sdk::{EventId, Kind, TagKind};
 
 /// Temporary scaffolding of old methods that have not been ported to use native Event methods
@@ -104,10 +110,26 @@ impl MaybeConvertibleToMuteList for nostr::Event {
             return None;
         }
         Some(MuteList {
-            public_keys: self.referenced_pubkeys().iter().map(|pk| pk.clone()).collect(),
-            hashtags: self.referenced_hashtags().iter().map(|tag| tag.clone()).collect(),
-            event_ids: self.referenced_event_ids().iter().map(|id| id.clone()).collect(),
-            words: self.get_tags_content(TagKind::Word).iter().map(|tag| tag.to_string()).collect(),
+            public_keys: self
+                .referenced_pubkeys()
+                .iter()
+                .map(|pk| pk.clone())
+                .collect(),
+            hashtags: self
+                .referenced_hashtags()
+                .iter()
+                .map(|tag| tag.clone())
+                .collect(),
+            event_ids: self
+                .referenced_event_ids()
+                .iter()
+                .map(|id| id.clone())
+                .collect(),
+            words: self
+                .get_tags_content(TagKind::Word)
+                .iter()
+                .map(|tag| tag.to_string())
+                .collect(),
         })
     }
 }
@@ -138,7 +160,8 @@ impl MaybeConvertibleToRelayList for nostr::Event {
         }
         let extracted_relay_list = nip65::extract_relay_list(&self);
         // Convert the extracted relay list data fully into owned data that can be returned
-        let extracted_relay_list_owned = extracted_relay_list.into_iter()
+        let extracted_relay_list_owned = extracted_relay_list
+            .into_iter()
             .map(|(url, metadata)| (url.clone(), metadata.as_ref().map(|m| m.clone())))
             .collect();
 
@@ -167,45 +190,60 @@ impl Codable for MuteList {
 
     fn from_json(json: serde_json::Value) -> Result<Self, Box<dyn std::error::Error>>
     where
-        Self: Sized {
-            let public_keys = json.get("public_keys")
-                .ok_or_else(|| "Missing 'public_keys' field".to_string())?
-                .as_array()
-                .ok_or_else(|| "'public_keys' must be an array".to_string())?
-                .iter()
-                .map(|pk| PublicKey::from_hex(pk.as_str().unwrap_or_default()).map_err(|e| e.to_string()))
-                .collect::<Result<Vec<PublicKey>, String>>()?;
-
-            let hashtags = json.get("hashtags")
-                .ok_or_else(|| "Missing 'hashtags' field".to_string())?
-                .as_array()
-                .ok_or_else(|| "'hashtags' must be an array".to_string())?
-                .iter()
-                .map(|tag| tag.as_str().map(|s| s.to_string()).ok_or_else(|| "Invalid hashtag".to_string()))
-                .collect::<Result<Vec<String>, String>>()?;
-
-            let event_ids = json.get("event_ids")
-                .ok_or_else(|| "Missing 'event_ids' field".to_string())?
-                .as_array()
-                .ok_or_else(|| "'event_ids' must be an array".to_string())?
-                .iter()
-                .map(|id| EventId::from_hex(id.as_str().unwrap_or_default()).map_err(|e| e.to_string()))
-                .collect::<Result<Vec<EventId>, String>>()?;
-
-            let words = json.get("words")
-                .ok_or_else(|| "Missing 'words' field".to_string())?
-                .as_array()
-                .ok_or_else(|| "'words' must be an array".to_string())?
-                .iter()
-                .map(|word| word.as_str().map(|s| s.to_string()).ok_or_else(|| "Invalid word".to_string()))
-                .collect::<Result<Vec<String>, String>>()?;
-
-            Ok(MuteList {
-                public_keys,
-                hashtags,
-                event_ids,
-                words,
+        Self: Sized,
+    {
+        let public_keys = json
+            .get("public_keys")
+            .ok_or_else(|| "Missing 'public_keys' field".to_string())?
+            .as_array()
+            .ok_or_else(|| "'public_keys' must be an array".to_string())?
+            .iter()
+            .map(|pk| {
+                PublicKey::from_hex(pk.as_str().unwrap_or_default()).map_err(|e| e.to_string())
             })
+            .collect::<Result<Vec<PublicKey>, String>>()?;
+
+        let hashtags = json
+            .get("hashtags")
+            .ok_or_else(|| "Missing 'hashtags' field".to_string())?
+            .as_array()
+            .ok_or_else(|| "'hashtags' must be an array".to_string())?
+            .iter()
+            .map(|tag| {
+                tag.as_str()
+                    .map(|s| s.to_string())
+                    .ok_or_else(|| "Invalid hashtag".to_string())
+            })
+            .collect::<Result<Vec<String>, String>>()?;
+
+        let event_ids = json
+            .get("event_ids")
+            .ok_or_else(|| "Missing 'event_ids' field".to_string())?
+            .as_array()
+            .ok_or_else(|| "'event_ids' must be an array".to_string())?
+            .iter()
+            .map(|id| EventId::from_hex(id.as_str().unwrap_or_default()).map_err(|e| e.to_string()))
+            .collect::<Result<Vec<EventId>, String>>()?;
+
+        let words = json
+            .get("words")
+            .ok_or_else(|| "Missing 'words' field".to_string())?
+            .as_array()
+            .ok_or_else(|| "'words' must be an array".to_string())?
+            .iter()
+            .map(|word| {
+                word.as_str()
+                    .map(|s| s.to_string())
+                    .ok_or_else(|| "Invalid word".to_string())
+            })
+            .collect::<Result<Vec<String>, String>>()?;
+
+        Ok(MuteList {
+            public_keys,
+            hashtags,
+            event_ids,
+            words,
+        })
     }
 }
 

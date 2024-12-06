@@ -1,12 +1,12 @@
-use crate::{notification_manager::nostr_event_extensions::MaybeConvertibleToTimestampedMuteList};
-use tokio::time::{Duration, Instant};
+use super::nostr_event_extensions::{MaybeConvertibleToRelayList, RelayList, TimestampedMuteList};
+use crate::notification_manager::nostr_event_extensions::MaybeConvertibleToTimestampedMuteList;
+use log;
 use nostr_sdk::prelude::*;
 use std::collections::HashMap;
-use log;
-use super::nostr_event_extensions::{MaybeConvertibleToRelayList, RelayList, TimestampedMuteList};
+use tokio::time::{Duration, Instant};
 
 struct CacheEntry<T> {
-    value: Option<T>,   // `None` means the event does not exist as far as we know (It does NOT mean expired)
+    value: Option<T>, // `None` means the event does not exist as far as we know (It does NOT mean expired)
     added_at: Instant,
 }
 
@@ -17,7 +17,10 @@ impl<T> CacheEntry<T> {
 
     pub fn new(value: T) -> Self {
         let added_at = Instant::now();
-        CacheEntry { value: Some(value), added_at }
+        CacheEntry {
+            value: Some(value),
+            added_at,
+        }
     }
 
     pub fn maybe(value: Option<T>) -> Self {
@@ -27,7 +30,10 @@ impl<T> CacheEntry<T> {
 
     pub fn empty() -> Self {
         let added_at = Instant::now();
-        CacheEntry { value: None, added_at }
+        CacheEntry {
+            value: None,
+            added_at,
+        }
     }
 
     pub fn value(&self) -> Option<&T> {
@@ -43,12 +49,21 @@ pub struct Cache {
     max_age: Duration,
 }
 
-fn get_cache_entry<T: Clone>(list: &mut HashMap<PublicKey, CacheEntry<T>>, pubkey: &PublicKey, max_age: Duration, name: &str) -> Result<Option<T>, CacheError> {
+fn get_cache_entry<T: Clone>(
+    list: &mut HashMap<PublicKey, CacheEntry<T>>,
+    pubkey: &PublicKey,
+    max_age: Duration,
+    name: &str,
+) -> Result<Option<T>, CacheError> {
     let res = if let Some(entry) = list.get(pubkey) {
         if !entry.is_expired(max_age) {
             Ok(entry.value().cloned())
         } else {
-            log::debug!("{} list for pubkey {} is expired, removing it from the cache", name, pubkey.to_hex());
+            log::debug!(
+                "{} list for pubkey {} is expired, removing it from the cache",
+                name,
+                pubkey.to_hex()
+            );
             Err(CacheError::Expired)
         }
     } else {
@@ -77,62 +92,90 @@ impl Cache {
 
     // MARK: - Adding items to the cache
 
-    pub fn add_optional_mute_list_with_author<'a>(&'a mut self, author: &PublicKey, mute_list: Option<&Event>) {
+    pub fn add_optional_mute_list_with_author<'a>(
+        &'a mut self,
+        author: &PublicKey,
+        mute_list: Option<&Event>,
+    ) {
         if let Some(mute_list) = mute_list {
             self.add_event(mute_list);
         } else {
-            self.mute_lists.insert(
-                author.to_owned(),
-                CacheEntry::empty(),
-            );
+            self.mute_lists
+                .insert(author.to_owned(), CacheEntry::empty());
         }
     }
 
-    pub fn add_optional_relay_list_with_author<'a>(&'a mut self, author: &PublicKey, relay_list_event: Option<&Event>) {
+    pub fn add_optional_relay_list_with_author<'a>(
+        &'a mut self,
+        author: &PublicKey,
+        relay_list_event: Option<&Event>,
+    ) {
         if let Some(relay_list_event) = relay_list_event {
             self.add_event(relay_list_event);
         } else {
-            self.relay_lists.insert(
-                author.to_owned(),
-                CacheEntry::empty(),
-            );
+            self.relay_lists
+                .insert(author.to_owned(), CacheEntry::empty());
         }
     }
 
-    pub fn add_optional_contact_list_with_author<'a>(&'a mut self, author: &PublicKey, contact_list: Option<&Event>) {
+    pub fn add_optional_contact_list_with_author<'a>(
+        &'a mut self,
+        author: &PublicKey,
+        contact_list: Option<&Event>,
+    ) {
         if let Some(contact_list) = contact_list {
             self.add_event(contact_list);
         } else {
-            self.contact_lists.insert(
-                author.to_owned(),
-                CacheEntry::empty(),
-            );
+            self.contact_lists
+                .insert(author.to_owned(), CacheEntry::empty());
         }
     }
 
     pub fn add_event(&mut self, event: &Event) {
         match event.kind {
             Kind::MuteList => {
-                self.mute_lists.insert(event.pubkey.clone(), CacheEntry::maybe(event.to_timestamped_mute_list()));
-                log::debug!("Added mute list to the cache. Event ID: {}", event.id.to_hex());
+                self.mute_lists.insert(
+                    event.pubkey.clone(),
+                    CacheEntry::maybe(event.to_timestamped_mute_list()),
+                );
+                log::debug!(
+                    "Added mute list to the cache. Event ID: {}",
+                    event.id.to_hex()
+                );
             }
             Kind::ContactList => {
-                log::debug!("Added contact list to the cache. Event ID: {}", event.id.to_hex());
-                self.contact_lists.insert(event.pubkey.clone(), CacheEntry::new(event.to_owned()));
-            },
+                log::debug!(
+                    "Added contact list to the cache. Event ID: {}",
+                    event.id.to_hex()
+                );
+                self.contact_lists
+                    .insert(event.pubkey.clone(), CacheEntry::new(event.to_owned()));
+            }
             Kind::RelayList => {
-                log::debug!("Added relay list to the cache. Event ID: {}", event.id.to_hex());
-                self.relay_lists.insert(event.pubkey.clone(), CacheEntry::maybe(event.to_relay_list()));
-            },
+                log::debug!(
+                    "Added relay list to the cache. Event ID: {}",
+                    event.id.to_hex()
+                );
+                self.relay_lists.insert(
+                    event.pubkey.clone(),
+                    CacheEntry::maybe(event.to_relay_list()),
+                );
+            }
             _ => {
-                log::debug!("Unknown event kind, not adding to any cache. Event ID: {}", event.id.to_hex());
+                log::debug!(
+                    "Unknown event kind, not adding to any cache. Event ID: {}",
+                    event.id.to_hex()
+                );
             }
         }
     }
 
     // MARK: - Fetching items from the cache
 
-    pub fn get_mute_list(&mut self, pubkey: &PublicKey) -> Result<Option<TimestampedMuteList>, CacheError> {
+    pub fn get_mute_list(
+        &mut self,
+        pubkey: &PublicKey,
+    ) -> Result<Option<TimestampedMuteList>, CacheError> {
         get_cache_entry(&mut self.mute_lists, pubkey, self.max_age, "Mute")
     }
 
@@ -156,14 +199,16 @@ pub enum CacheError {
 mod tests {
     use super::*;
     use nostr_sdk::prelude::*;
+    use std::str::FromStr;
     use std::time::Duration;
     use tokio::time::sleep;
-    use std::str::FromStr;
 
     // Helper function to create a dummy event of a given kind for testing.
     fn create_dummy_event(pubkey: PublicKey, kind: Kind) -> Event {
         // In a real test, you might generate keys or events more dynamically.
-        let id = EventId::from_hex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
+        let id =
+            EventId::from_hex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                .unwrap();
         let created_at = Timestamp::now();
         let content = "";
         let sig_str = "8e1a61523765a6e577e3ca0c87afe3694ed518719aea067701c35262dd2a3c7e3ca0946fe98463a3af706dd333695ceec6cb3b29254c557c8630d3db1171ea3d";
@@ -175,7 +220,8 @@ mod tests {
     // Helper function to create a dummy public key for testing.
     fn create_dummy_pubkey() -> PublicKey {
         // In a real project, you'd generate a key. For the sake of tests, just parse a known hex.
-        PublicKey::from_hex("32e1827635450ebb3c5a7d12c1f8e7b2b514439ac10a67eef3d9fd9c5c68e245").unwrap()
+        PublicKey::from_hex("32e1827635450ebb3c5a7d12c1f8e7b2b514439ac10a67eef3d9fd9c5c68e245")
+            .unwrap()
     }
 
     #[tokio::test]
@@ -185,7 +231,10 @@ mod tests {
         let mut cache = Cache::new(max_age);
 
         // Initially, no contact list should be found.
-        assert!(matches!(cache.get_contact_list(&pubkey), Err(CacheError::NotFound)));
+        assert!(matches!(
+            cache.get_contact_list(&pubkey),
+            Err(CacheError::NotFound)
+        ));
 
         // Add a contact list event.
         let event = create_dummy_event(pubkey, Kind::ContactList);
@@ -205,7 +254,10 @@ mod tests {
         let mut cache = Cache::new(max_age);
 
         // No mute list initially
-        assert!(matches!(cache.get_mute_list(&pubkey), Err(CacheError::NotFound)));
+        assert!(matches!(
+            cache.get_mute_list(&pubkey),
+            Err(CacheError::NotFound)
+        ));
 
         // Add a mute list event.
         let mutelist_event = {
@@ -225,7 +277,10 @@ mod tests {
         let mut cache = Cache::new(max_age);
 
         // No relay list initially
-        assert!(matches!(cache.get_relay_list(&pubkey), Err(CacheError::NotFound)));
+        assert!(matches!(
+            cache.get_relay_list(&pubkey),
+            Err(CacheError::NotFound)
+        ));
 
         // Add a relay list event.
         let relaylist_event = create_dummy_event(pubkey, Kind::RelayList);

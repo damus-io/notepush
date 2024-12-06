@@ -104,8 +104,13 @@ impl RelayConnection {
             ClientMessage::Event(event) => {
                 log::info!("Received event with id: {:?}", event.id.to_hex());
                 log::debug!("Event received: {:?}", event);
-                self.notification_manager.event_saver.save_if_needed(&event).await?;
-                self.notification_manager.send_notifications_if_needed(&event).await?;
+                self.notification_manager
+                    .event_saver
+                    .save_if_needed(&event)
+                    .await?;
+                self.notification_manager
+                    .send_notifications_if_needed(&event)
+                    .await?;
                 let notice_message = format!("blocked: This relay does not store events");
                 let response = RelayMessage::Ok {
                     event_id: event.id,

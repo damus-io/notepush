@@ -32,7 +32,7 @@ impl APIHandler {
             base_url,
         }
     }
-    
+
     // MARK: - HTTP handling
 
     pub async fn handle_http_request(
@@ -159,36 +159,53 @@ impl APIHandler {
             authorized_pubkey,
         })
     }
-    
+
     // MARK: - Router
 
     async fn handle_parsed_http_request(
         &self,
         parsed_request: &ParsedRequest,
     ) -> Result<APIResponse, Box<dyn std::error::Error>> {
-        
-        if let Some(url_params) = route_match(&Method::PUT, "/user-info/:pubkey/:deviceToken", &parsed_request) {
+        if let Some(url_params) = route_match(
+            &Method::PUT,
+            "/user-info/:pubkey/:deviceToken",
+            &parsed_request,
+        ) {
             return self.handle_user_info(parsed_request, &url_params).await;
         }
-        
-        if let Some(url_params) = route_match(&Method::DELETE, "/user-info/:pubkey/:deviceToken", &parsed_request) {
-            return self.handle_user_info_remove(parsed_request, &url_params).await;
+
+        if let Some(url_params) = route_match(
+            &Method::DELETE,
+            "/user-info/:pubkey/:deviceToken",
+            &parsed_request,
+        ) {
+            return self
+                .handle_user_info_remove(parsed_request, &url_params)
+                .await;
         }
-        
-        if let Some(url_params) = route_match(&Method::GET, "/user-info/:pubkey/:deviceToken/preferences", &parsed_request) {
+
+        if let Some(url_params) = route_match(
+            &Method::GET,
+            "/user-info/:pubkey/:deviceToken/preferences",
+            &parsed_request,
+        ) {
             return self.get_user_settings(parsed_request, &url_params).await;
         }
-        
-        if let Some(url_params) = route_match(&Method::PUT, "/user-info/:pubkey/:deviceToken/preferences", &parsed_request) {
+
+        if let Some(url_params) = route_match(
+            &Method::PUT,
+            "/user-info/:pubkey/:deviceToken/preferences",
+            &parsed_request,
+        ) {
             return self.set_user_settings(parsed_request, &url_params).await;
         }
-        
+
         Ok(APIResponse {
             status: StatusCode::NOT_FOUND,
             body: json!({ "error": "Not found" }),
         })
     }
-    
+
     // MARK: - Authentication
 
     async fn authenticate(
@@ -209,7 +226,7 @@ impl APIHandler {
         )
         .await)
     }
-    
+
     // MARK: - Endpoint handlers
 
     async fn handle_user_info(
@@ -220,30 +237,36 @@ impl APIHandler {
         // Early return if `deviceToken` is missing
         let device_token = match url_params.get("deviceToken") {
             Some(token) => token,
-            None => return Ok(APIResponse {
-                status: StatusCode::BAD_REQUEST,
-                body: json!({ "error": "deviceToken is required on the URL" }),
-            }),
+            None => {
+                return Ok(APIResponse {
+                    status: StatusCode::BAD_REQUEST,
+                    body: json!({ "error": "deviceToken is required on the URL" }),
+                })
+            }
         };
-    
+
         // Early return if `pubkey` is missing
         let pubkey = match url_params.get("pubkey") {
             Some(key) => key,
-            None => return Ok(APIResponse {
-                status: StatusCode::BAD_REQUEST,
-                body: json!({ "error": "pubkey is required on the URL" }),
-            }),
+            None => {
+                return Ok(APIResponse {
+                    status: StatusCode::BAD_REQUEST,
+                    body: json!({ "error": "pubkey is required on the URL" }),
+                })
+            }
         };
-        
+
         // Validate the `pubkey` and prepare it for use
         let pubkey = match nostr::PublicKey::from_hex(pubkey) {
             Ok(key) => key,
-            Err(_) => return Ok(APIResponse {
-                status: StatusCode::BAD_REQUEST,
-                body: json!({ "error": "Invalid pubkey" }),
-            }),
+            Err(_) => {
+                return Ok(APIResponse {
+                    status: StatusCode::BAD_REQUEST,
+                    body: json!({ "error": "Invalid pubkey" }),
+                })
+            }
         };
-    
+
         // Early return if `pubkey` does not match `req.authorized_pubkey`
         if pubkey != req.authorized_pubkey {
             return Ok(APIResponse {
@@ -251,9 +274,11 @@ impl APIHandler {
                 body: json!({ "error": "Forbidden" }),
             });
         }
-        
+
         // Proceed with the main logic after passing all checks
-        self.notification_manager.save_user_device_info_if_not_present(pubkey, device_token).await?;
+        self.notification_manager
+            .save_user_device_info_if_not_present(pubkey, device_token)
+            .await?;
         Ok(APIResponse {
             status: StatusCode::OK,
             body: json!({ "message": "User info saved successfully" }),
@@ -268,30 +293,36 @@ impl APIHandler {
         // Early return if `deviceToken` is missing
         let device_token = match url_params.get("deviceToken") {
             Some(token) => token,
-            None => return Ok(APIResponse {
-                status: StatusCode::BAD_REQUEST,
-                body: json!({ "error": "deviceToken is required on the URL" }),
-            }),
+            None => {
+                return Ok(APIResponse {
+                    status: StatusCode::BAD_REQUEST,
+                    body: json!({ "error": "deviceToken is required on the URL" }),
+                })
+            }
         };
-        
+
         // Early return if `pubkey` is missing
         let pubkey = match url_params.get("pubkey") {
             Some(key) => key,
-            None => return Ok(APIResponse {
-                status: StatusCode::BAD_REQUEST,
-                body: json!({ "error": "pubkey is required on the URL" }),
-            }),
+            None => {
+                return Ok(APIResponse {
+                    status: StatusCode::BAD_REQUEST,
+                    body: json!({ "error": "pubkey is required on the URL" }),
+                })
+            }
         };
-        
+
         // Validate the `pubkey` and prepare it for use
         let pubkey = match nostr::PublicKey::from_hex(pubkey) {
             Ok(key) => key,
-            Err(_) => return Ok(APIResponse {
-                status: StatusCode::BAD_REQUEST,
-                body: json!({ "error": "Invalid pubkey" }),
-            }),
+            Err(_) => {
+                return Ok(APIResponse {
+                    status: StatusCode::BAD_REQUEST,
+                    body: json!({ "error": "Invalid pubkey" }),
+                })
+            }
         };
-        
+
         // Early return if `pubkey` does not match `req.authorized_pubkey`
         if pubkey != req.authorized_pubkey {
             return Ok(APIResponse {
@@ -299,16 +330,18 @@ impl APIHandler {
                 body: json!({ "error": "Forbidden" }),
             });
         }
-        
+
         // Proceed with the main logic after passing all checks
-        self.notification_manager.remove_user_device_info(pubkey, device_token).await?;
-        
+        self.notification_manager
+            .remove_user_device_info(pubkey, device_token)
+            .await?;
+
         Ok(APIResponse {
             status: StatusCode::OK,
             body: json!({ "message": "User info removed successfully" }),
         })
     }
-    
+
     async fn set_user_settings(
         &self,
         req: &ParsedRequest,
@@ -317,30 +350,36 @@ impl APIHandler {
         // Early return if `deviceToken` is missing
         let device_token = match url_params.get("deviceToken") {
             Some(token) => token,
-            None => return Ok(APIResponse {
-                status: StatusCode::BAD_REQUEST,
-                body: json!({ "error": "deviceToken is required on the URL" }),
-            }),
+            None => {
+                return Ok(APIResponse {
+                    status: StatusCode::BAD_REQUEST,
+                    body: json!({ "error": "deviceToken is required on the URL" }),
+                })
+            }
         };
-        
+
         // Early return if `pubkey` is missing
         let pubkey = match url_params.get("pubkey") {
             Some(key) => key,
-            None => return Ok(APIResponse {
-                status: StatusCode::BAD_REQUEST,
-                body: json!({ "error": "pubkey is required on the URL" }),
-            }),
+            None => {
+                return Ok(APIResponse {
+                    status: StatusCode::BAD_REQUEST,
+                    body: json!({ "error": "pubkey is required on the URL" }),
+                })
+            }
         };
-        
+
         // Validate the `pubkey` and prepare it for use
         let pubkey = match nostr::PublicKey::from_hex(pubkey) {
             Ok(key) => key,
-            Err(_) => return Ok(APIResponse {
-                status: StatusCode::BAD_REQUEST,
-                body: json!({ "error": "Invalid pubkey" }),
-            }),
+            Err(_) => {
+                return Ok(APIResponse {
+                    status: StatusCode::BAD_REQUEST,
+                    body: json!({ "error": "Invalid pubkey" }),
+                })
+            }
         };
-        
+
         // Early return if `pubkey` does not match `req.authorized_pubkey`
         if pubkey != req.authorized_pubkey {
             return Ok(APIResponse {
@@ -348,7 +387,7 @@ impl APIHandler {
                 body: json!({ "error": "Forbidden" }),
             });
         }
-        
+
         // Proceed with the main logic after passing all checks
         let body = req.body_json()?;
 
@@ -361,14 +400,20 @@ impl APIHandler {
                 });
             }
         };
-        
-        self.notification_manager.save_user_notification_settings(&req.authorized_pubkey, device_token.to_string(), settings).await?;
+
+        self.notification_manager
+            .save_user_notification_settings(
+                &req.authorized_pubkey,
+                device_token.to_string(),
+                settings,
+            )
+            .await?;
         return Ok(APIResponse {
             status: StatusCode::OK,
             body: json!({ "message": "User settings saved successfully" }),
         });
     }
-    
+
     async fn get_user_settings(
         &self,
         req: &ParsedRequest,
@@ -377,30 +422,36 @@ impl APIHandler {
         // Early return if `deviceToken` is missing
         let device_token = match url_params.get("deviceToken") {
             Some(token) => token,
-            None => return Ok(APIResponse {
-                status: StatusCode::BAD_REQUEST,
-                body: json!({ "error": "deviceToken is required on the URL" }),
-            }),
+            None => {
+                return Ok(APIResponse {
+                    status: StatusCode::BAD_REQUEST,
+                    body: json!({ "error": "deviceToken is required on the URL" }),
+                })
+            }
         };
-        
+
         // Early return if `pubkey` is missing
         let pubkey = match url_params.get("pubkey") {
             Some(key) => key,
-            None => return Ok(APIResponse {
-                status: StatusCode::BAD_REQUEST,
-                body: json!({ "error": "pubkey is required on the URL" }),
-            }),
+            None => {
+                return Ok(APIResponse {
+                    status: StatusCode::BAD_REQUEST,
+                    body: json!({ "error": "pubkey is required on the URL" }),
+                })
+            }
         };
-        
+
         // Validate the `pubkey` and prepare it for use
         let pubkey = match nostr::PublicKey::from_hex(pubkey) {
             Ok(key) => key,
-            Err(_) => return Ok(APIResponse {
-                status: StatusCode::BAD_REQUEST,
-                body: json!({ "error": "Invalid pubkey" }),
-            }),
+            Err(_) => {
+                return Ok(APIResponse {
+                    status: StatusCode::BAD_REQUEST,
+                    body: json!({ "error": "Invalid pubkey" }),
+                })
+            }
         };
-        
+
         // Early return if `pubkey` does not match `req.authorized_pubkey`
         if pubkey != req.authorized_pubkey {
             return Ok(APIResponse {
@@ -408,10 +459,13 @@ impl APIHandler {
                 body: json!({ "error": "Forbidden" }),
             });
         }
-        
+
         // Proceed with the main logic after passing all checks
-        let settings = self.notification_manager.get_user_notification_settings(&req.authorized_pubkey, device_token.to_string()).await?;
-        
+        let settings = self
+            .notification_manager
+            .get_user_notification_settings(&req.authorized_pubkey, device_token.to_string())
+            .await?;
+
         Ok(APIResponse {
             status: StatusCode::OK,
             body: json!(settings),
@@ -462,10 +516,14 @@ struct APIResponse {
 }
 
 // MARK: - Helper functions
- 
+
 /// Matches the request to a specified route, returning a hashmap of the route parameters
 /// e.g. GET /user/:id/info route against request GET /user/123/info matches to { "id": "123" }
-fn route_match<'a>(method: &Method, path: &'a str, req: &ParsedRequest) -> Option<HashMap<&'a str, String>> {
+fn route_match<'a>(
+    method: &Method,
+    path: &'a str,
+    req: &ParsedRequest,
+) -> Option<HashMap<&'a str, String>> {
     if method != req.method {
         return None;
     }

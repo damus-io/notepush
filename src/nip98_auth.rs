@@ -1,10 +1,10 @@
+use super::utils::time_delta::TimeDelta;
 use base64::prelude::*;
 use nostr;
 use nostr::bitcoin::hashes::sha256::Hash as Sha256Hash;
 use nostr::bitcoin::hashes::Hash;
 use nostr::util::hex;
 use serde_json::Value;
-use super::utils::time_delta::TimeDelta;
 
 pub async fn nip98_verify_auth_header(
     auth_header: String,
