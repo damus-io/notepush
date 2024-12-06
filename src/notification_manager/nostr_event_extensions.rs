@@ -3,9 +3,6 @@ use nostr_sdk::{EventId, Kind, TagKind};
 
 /// Temporary scaffolding of old methods that have not been ported to use native Event methods
 pub trait ExtendedEvent {
-    /// Checks if the note references a given pubkey
-    fn references_pubkey(&self, pubkey: &PublicKey) -> bool;
-
     /// Retrieves a set of pubkeys referenced by the note
     fn referenced_pubkeys(&self) -> std::collections::HashSet<nostr::PublicKey>;
 
@@ -21,11 +18,6 @@ pub trait ExtendedEvent {
 
 // This is a wrapper around the Event type from strfry-policies, which adds some useful methods
 impl ExtendedEvent for nostr::Event {
-    /// Checks if the note references a given pubkey
-    fn references_pubkey(&self, pubkey: &PublicKey) -> bool {
-        self.referenced_pubkeys().contains(pubkey)
-    }
-
     /// Retrieves a set of pubkeys referenced by the note
     fn referenced_pubkeys(&self) -> std::collections::HashSet<nostr::PublicKey> {
         self.get_tags_content(SingleLetter(SingleLetterTag::lowercase(Alphabet::P)))
@@ -149,6 +141,7 @@ impl MaybeConvertibleToRelayList for nostr::Event {
         let extracted_relay_list_owned = extracted_relay_list.into_iter()
             .map(|(url, metadata)| (url.clone(), metadata.as_ref().map(|m| m.clone())))
             .collect();
+
         Some(extracted_relay_list_owned)
     }
 }
@@ -216,6 +209,7 @@ impl Codable for MuteList {
     }
 }
 
+#[derive(Clone)]
 pub struct TimestampedMuteList {
     pub mute_list: MuteList,
     pub timestamp: nostr::Timestamp,

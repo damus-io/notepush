@@ -1,5 +1,5 @@
 use tokio::sync::Mutex;
-use super::nostr_event_extensions::{MaybeConvertibleToRelayList, MaybeConvertibleToTimestampedMuteList, RelayList, TimestampedMuteList};
+use super::nostr_event_extensions::{RelayList, TimestampedMuteList};
 use super::notification_manager::EventSaver;
 use super::ExtendedEvent;
 use nostr_sdk::prelude::*;
@@ -59,8 +59,8 @@ impl NostrNetworkHelper {
         // We don't have an answer from the cache, so we need to fetch it
         let mute_list_event = self.fetch_single_event(pubkey, Kind::MuteList).await;
         let mut cache_mutex_guard = self.cache.lock().await;
-        cache_mutex_guard.add_optional_mute_list_with_author(pubkey, mute_list_event.clone());
-        Some(mute_list_event?.to_timestamped_mute_list()?)
+        cache_mutex_guard.add_optional_mute_list_with_author(pubkey, mute_list_event.as_ref());
+        cache_mutex_guard.get_mute_list(pubkey).ok()?
     }
 
     pub async fn get_relay_list(&self, pubkey: &PublicKey) -> Option<RelayList> {
@@ -74,8 +74,8 @@ impl NostrNetworkHelper {
         // We don't have an answer from the cache, so we need to fetch it
         let relay_list_event = NostrNetworkHelper::fetch_single_event_from_client(pubkey, Kind::RelayList, &self.bootstrap_client).await;
         let mut cache_mutex_guard = self.cache.lock().await;
-        cache_mutex_guard.add_optional_relay_list_with_author(pubkey, relay_list_event.clone());
-        relay_list_event?.to_relay_list()
+        cache_mutex_guard.add_optional_relay_list_with_author(pubkey, relay_list_event.as_ref());
+        cache_mutex_guard.get_relay_list(pubkey).ok()?
     }
 
     pub async fn get_contact_list(&self, pubkey: &PublicKey) -> Option<Event> {
@@ -89,8 +89,8 @@ impl NostrNetworkHelper {
         // We don't have an answer from the cache, so we need to fetch it
         let contact_list_event = self.fetch_single_event(pubkey, Kind::ContactList).await;
         let mut cache_mutex_guard = self.cache.lock().await;
-        cache_mutex_guard.add_optional_contact_list_with_author(pubkey, contact_list_event.clone());
-        contact_list_event
+        cache_mutex_guard.add_optional_contact_list_with_author(pubkey, contact_list_event.as_ref());
+        cache_mutex_guard.get_contact_list(pubkey).ok()?
     }
 
     // MARK: - Lower level fetching functions
