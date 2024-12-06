@@ -17,7 +17,7 @@ tracing = "0.1.40"
 # That said, it's not ideal for all scenarios and in particular, generic
 # libraries built around `rusqlite` should probably not enable it, which
 # is why it is not a default feature -- it could become hard to disable.
-rusqlite = { version = "0.31.0", features = ["bundled"] }
+rusqlite = { version = "0.31.0", features = ["bundled", "serde_json"] }
 chrono = { version = "0.4.38" }
 a2 = { version = "0.10.0" }
 tokio = { version = "1.38.0", features = ["full"] }

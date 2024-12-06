@@ -2,6 +2,7 @@ use a2::{Client, ClientConfig, DefaultNotificationBuilder, NotificationBuilder};
 use log;
 use nostr::event::EventId;
 use nostr::key::PublicKey;
+use nostr::nips::nip51::MuteList;
 use nostr::types::Timestamp;
 use nostr_sdk::JsonUtil;
 use nostr_sdk::Kind;
@@ -11,9 +12,14 @@ use serde::Deserialize;
 use serde::Serialize;
 use tokio::sync::Mutex;
 use std::collections::HashSet;
+use std::sync::Arc;
 use tokio;
 
+use super::nostr_event_extensions::Codable;
+use super::nostr_event_extensions::MaybeConvertibleToMuteList;
+use super::nostr_event_extensions::TimestampedMuteList;
 use super::nostr_network_helper::NostrNetworkHelper;
+use super::utils::should_mute_notification_for_mutelist;
 use super::ExtendedEvent;
 use super::SqlStringConvertible;
 use nostr::Event;
@@ -24,10 +30,88 @@ use std::fs::File;
 // MARK: - NotificationManager
 
 pub struct NotificationManager {
-    db: Mutex<r2d2::Pool<SqliteConnectionManager>>,
+    db: Arc<Mutex<r2d2::Pool<SqliteConnectionManager>>>,
     apns_topic: String,
     apns_client: Mutex<Client>,
     nostr_network_helper: NostrNetworkHelper,
+    pub event_saver: EventSaver
+}
+
+#[derive(Clone)]
+pub struct EventSaver {
+    db: Arc<Mutex<r2d2::Pool<SqliteConnectionManager>>>
+}
+
+impl EventSaver {
+    pub fn new(db: Arc<Mutex<r2d2::Pool<SqliteConnectionManager>>>) -> Self {
+        Self { db }
+    }
+
+    pub async fn save_if_needed(&self, event: &nostr::Event) -> Result<bool, Box<dyn std::error::Error>> {
+        match event.to_mute_list() {
+            Some(mute_list) => {
+                match self.get_saved_mute_list_for(event.author()).await.ok().flatten() {
+                    Some(timestamped_mute_list) => {
+                        let timestamp = timestamped_mute_list.timestamp;
+                        let mute_list = timestamped_mute_list.mute_list;
+                        if timestamp < event.created_at() {
+                            self.save_mute_list(event.author(), mute_list, event.created_at).await?;
+                        }
+                        else {
+                            return Ok(false)
+                        }
+                    },
+                    None => {
+                        self.save_mute_list(event.author(), mute_list, event.created_at).await?;
+                    }
+                }
+                Ok(true)
+            },
+            None => Ok(false),
+        }
+    }
+
+    // MARK: - Muting preferences
+
+    pub async fn save_mute_list(&self, pubkey: PublicKey, mute_list: MuteList, created_at: Timestamp) -> Result<(), Box<dyn std::error::Error>> {
+        let mute_list_json = mute_list.to_json()?;
+        let db_mutex_guard = self.db.lock().await;
+        let connection = db_mutex_guard.get()?;
+
+        connection.execute(
+            "INSERT OR REPLACE INTO muting_preferences (user_pubkey, mute_list, created_at) VALUES (?, ?, ?)",
+            params![
+                pubkey.to_sql_string(),
+                mute_list_json,
+                created_at.to_sql_string()
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    pub async fn get_saved_mute_list_for(&self, pubkey: PublicKey) -> Result<Option<TimestampedMuteList>, Box<dyn std::error::Error>> {
+        let db_mutex_guard = self.db.lock().await;
+        let connection = db_mutex_guard.get()?;
+
+        let mut stmt = connection.prepare(
+            "SELECT mute_list, created_at FROM muting_preferences WHERE user_pubkey = ?",
+        )?;
+
+        let mute_list_info: (serde_json::Value, nostr::Timestamp) = match stmt.query_row([pubkey.to_sql_string()], |row| { Ok((row.get(0)?, row.get(1)?)) }) {
+            Ok(info) => (info.0, nostr::Timestamp::from_sql_string(info.1)?),
+            Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+
+        let mute_list = MuteList::from_json(mute_list_info.0)?;
+        let timestamped_mute_list = TimestampedMuteList {
+            mute_list,
+            timestamp: mute_list_info.1
+        };
+
+        Ok(Some(timestamped_mute_list))
+    }
 }
 
 impl NotificationManager {
@@ -55,19 +139,25 @@ impl NotificationManager {
             ClientConfig::new(apns_environment.clone()),
         )?;
 
-        Ok(Self {
+        let db = Arc::new(Mutex::new(db));
+        let event_saver = EventSaver::new(db.clone());
+
+        let manager = NotificationManager {
+            db,
             apns_topic,
             apns_client: Mutex::new(client),
-            db: Mutex::new(db),
-            nostr_network_helper: NostrNetworkHelper::new(relay_url.clone(), cache_max_age).await?,
-        })
+            nostr_network_helper: NostrNetworkHelper::new(relay_url.clone(), cache_max_age, event_saver.clone()).await?,
+            event_saver,
+        };
+
+        Ok(manager)
     }
 
     // MARK: - Database setup operations
 
     pub fn setup_database(db: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
         // Initial schema setup
-        
+
         db.execute(
             "CREATE TABLE IF NOT EXISTS notifications (
                 id TEXT PRIMARY KEY,
@@ -99,15 +189,26 @@ impl NotificationManager {
 
         Self::add_column_if_not_exists(&db, "notifications", "sent_at", "INTEGER", None)?;
         Self::add_column_if_not_exists(&db, "user_info", "added_at", "INTEGER", None)?;
-        
+
         // Notification settings migration (https://github.com/damus-io/damus/issues/2360)
-        
+
         Self::add_column_if_not_exists(&db, "user_info", "zap_notifications_enabled", "BOOLEAN", Some("true"))?;
         Self::add_column_if_not_exists(&db, "user_info", "mention_notifications_enabled", "BOOLEAN", Some("true"))?;
         Self::add_column_if_not_exists(&db, "user_info", "repost_notifications_enabled", "BOOLEAN", Some("true"))?;
         Self::add_column_if_not_exists(&db, "user_info", "reaction_notifications_enabled", "BOOLEAN", Some("true"))?;
         Self::add_column_if_not_exists(&db, "user_info", "dm_notifications_enabled", "BOOLEAN", Some("true"))?;
         Self::add_column_if_not_exists(&db, "user_info", "only_notifications_from_following_enabled", "BOOLEAN", Some("false"))?;
+
+        // Migration related to mute list improvements (https://github.com/damus-io/damus/issues/2118)
+
+        db.execute(
+            "CREATE TABLE IF NOT EXISTS muting_preferences (
+                user_pubkey TEXT PRIMARY KEY,
+                mute_list JSON NOT NULL,
+                created_at TEXT NOT NULL
+            )",
+            [],
+        )?;
 
         Ok(())
     }
@@ -154,7 +255,7 @@ impl NotificationManager {
             log::debug!("Event is older than a week, not sending notifications");
             return Ok(());
         }
-        
+
         if !Self::is_event_kind_supported(event.kind) {
             log::debug!("Event kind is not supported, not sending notifications");
             return Ok(());
@@ -187,7 +288,7 @@ impl NotificationManager {
         }
         Ok(())
     }
-    
+
     fn is_event_kind_supported(event_kind: nostr::Kind) -> bool {
         match event_kind {
             nostr_sdk::Kind::TextNote => true,
@@ -221,13 +322,12 @@ impl NotificationManager {
             .filter(|&x| *x != event.pubkey)
             .cloned()
             .collect();
-        
+
 
         let mut pubkeys_to_notify = HashSet::new();
         for pubkey in relevant_pubkeys_yet_to_receive {
             let should_mute: bool = {
-                self.nostr_network_helper
-                    .should_mute_notification_for_pubkey(event, &pubkey)
+                self.should_mute_notification_for_pubkey(event, &pubkey)
                     .await
             };
             if !should_mute {
@@ -235,6 +335,42 @@ impl NotificationManager {
             }
         }
         Ok(pubkeys_to_notify)
+    }
+
+    async fn should_mute_notification_for_pubkey(&self, event: &Event, pubkey: &PublicKey) -> bool {
+        let latest_mute_list = self.get_newest_mute_list_available(pubkey).await.ok().flatten();
+        if let Some(latest_mute_list) = latest_mute_list {
+            return should_mute_notification_for_mutelist(event, &latest_mute_list)
+        }
+        return false
+    }
+
+    async fn get_newest_mute_list_available(&self, pubkey: &PublicKey) -> Result<Option<MuteList>, Box<dyn std::error::Error>> {
+        let timestamped_saved_mute_list = self.event_saver.get_saved_mute_list_for(*pubkey).await?;
+        let timestamped_network_mute_list = self.nostr_network_helper.get_public_mute_list(pubkey).await;
+        Ok(match (timestamped_saved_mute_list, timestamped_network_mute_list) {
+            (Some(local_mute), Some(network_mute)) => {
+                if local_mute.timestamp > network_mute.timestamp {
+                    log::debug!("Mute lists available in both database and from the network for pubkey {}. Using local mute list since it's newer.", pubkey.to_hex());
+                    Some(local_mute.mute_list)
+                } else {
+                    log::debug!("Mute lists available in both database and from the network for pubkey {}. Using network mute list since it's newer.", pubkey.to_hex());
+                    Some(network_mute.mute_list)
+                }
+            },
+            (Some(local_mute), None) => {
+                log::debug!("Mute list available in database for pubkey {}, but not from the network. Using local mute list.", pubkey.to_hex());
+                Some(local_mute.mute_list)
+            },
+            (None, Some(network_mute)) => {
+                log::debug!("Mute list for pubkey {} available from the network, but not in the database. Using network mute list.", pubkey.to_hex());
+                Some(network_mute.mute_list)
+            },
+            (None, None) => {
+                log::debug!("No mute list available for pubkey {}", pubkey.to_hex());
+                None
+            },
+        })
     }
 
     async fn pubkeys_relevant_to_event(
@@ -281,7 +417,7 @@ impl NotificationManager {
         }
         Ok(())
     }
-    
+
     async fn user_wants_notification(
         &self,
         pubkey: &PublicKey,
@@ -306,7 +442,7 @@ impl NotificationManager {
             _ => Ok(false),
         }
     }
-    
+
     async fn is_pubkey_token_pair_registered(
         &self,
         pubkey: &PublicKey,
@@ -315,7 +451,7 @@ impl NotificationManager {
         let current_device_tokens = self.get_user_device_tokens(pubkey).await?;
         Ok(current_device_tokens.contains(&device_token.to_string()))
     }
-    
+
     async fn is_pubkey_registered(
         &self,
         pubkey: &PublicKey,
@@ -386,10 +522,10 @@ impl NotificationManager {
 
         payload.options.apns_topic = Some(self.apns_topic.as_str());
         payload.data.insert("nostr_event", serde_json::Value::String(event.try_as_json()?));
-        
+
 
         let apns_client_mutex_guard = self.apns_client.lock().await;
-        
+
         match apns_client_mutex_guard.send(payload).await {
             Ok(_response) => {},
             Err(e) => log::error!("Failed to send notification to device token '{}': {}", device_token, e),
@@ -422,9 +558,9 @@ impl NotificationManager {
         };
         (title, "".to_string(), body)
     }
-    
+
     // MARK: - User device info and settings
-    
+
     pub async fn save_user_device_info_if_not_present(
         &self,
         pubkey: nostr::PublicKey,
@@ -446,7 +582,7 @@ impl NotificationManager {
         db_mutex_guard.get()?.execute(
             "INSERT OR REPLACE INTO user_info (id, pubkey, device_token, added_at) VALUES (?, ?, ?, ?)",
             params![
-                format!("{}:{}", pubkey.to_sql_string(), device_token), 
+                format!("{}:{}", pubkey.to_sql_string(), device_token),
                 pubkey.to_sql_string(),
                 device_token,
                 current_time_unix.to_sql_string()
@@ -467,7 +603,7 @@ impl NotificationManager {
         )?;
         Ok(())
     }
-    
+
     pub async fn get_user_notification_settings(
         &self,
         pubkey: &PublicKey,
@@ -489,10 +625,10 @@ impl NotificationManager {
                     only_notifications_from_following_enabled: row.get(5)?,
                 })
             })?;
-        
+
         Ok(settings)
     }
-    
+
     pub async fn save_user_notification_settings(
         &self,
         pubkey: &PublicKey,

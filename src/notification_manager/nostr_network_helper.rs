@@ -1,5 +1,6 @@
 use tokio::sync::Mutex;
-use super::nostr_event_extensions::MaybeConvertibleToMuteList;
+use super::nostr_event_extensions::{MaybeConvertibleToRelayList, MaybeConvertibleToTimestampedMuteList, RelayList, TimestampedMuteList};
+use super::notification_manager::EventSaver;
 use super::ExtendedEvent;
 use nostr_sdk::prelude::*;
 use super::nostr_event_cache::Cache;
@@ -8,70 +9,26 @@ use tokio::time::{timeout, Duration};
 const NOTE_FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct NostrNetworkHelper {
-    client: Client,
+    bootstrap_client: Client,
     cache: Mutex<Cache>,
+    event_saver: EventSaver
 }
 
 impl NostrNetworkHelper {
     // MARK: - Initialization
 
-    pub async fn new(relay_url: String, cache_max_age: Duration) -> Result<Self, Box<dyn std::error::Error>> {
+    pub async fn new(relay_url: String, cache_max_age: Duration, event_saver: EventSaver) -> Result<Self, Box<dyn std::error::Error>> {
         let client = Client::new(&Keys::generate());
         client.add_relay(relay_url.clone()).await?;
         client.connect().await;
-        
-        Ok(NostrNetworkHelper { 
-            client,
+        Ok(NostrNetworkHelper {
+            bootstrap_client: client,
             cache: Mutex::new(Cache::new(cache_max_age)),
+            event_saver,
         })
     }
 
     // MARK: - Answering questions about a user
-
-    pub async fn should_mute_notification_for_pubkey(
-        &self,
-        event: &Event,
-        pubkey: &PublicKey,
-    ) -> bool {
-        log::debug!(
-            "Checking if event {:?} should be muted for pubkey {:?}",
-            event,
-            pubkey
-        );
-        if let Some(mute_list) = self.get_public_mute_list(pubkey).await {
-            for muted_public_key in mute_list.public_keys {
-                if event.pubkey == muted_public_key {
-                    return true;
-                }
-            }
-            for muted_event_id in mute_list.event_ids {
-                if event.id == muted_event_id
-                    || event.referenced_event_ids().contains(&muted_event_id)
-                {
-                    return true;
-                }
-            }
-            for muted_hashtag in mute_list.hashtags {
-                if event
-                    .referenced_hashtags()
-                    .iter()
-                    .any(|t| t == &muted_hashtag)
-                {
-                    return true;
-                }
-            }
-            for muted_word in mute_list.words {
-                if event
-                    .content
-                    .to_lowercase()
-                    .contains(&muted_word.to_lowercase())
-                {
-                    return true;
-                }
-            }
-        }
-        false
-    }
 
     pub async fn does_pubkey_follow_pubkey(
         &self,
@@ -91,19 +48,34 @@ impl NostrNetworkHelper {
 
     // MARK: - Getting specific event types with caching
 
-    pub async fn get_public_mute_list(&self, pubkey: &PublicKey) -> Option<MuteList> {
+    pub async fn get_public_mute_list(&self, pubkey: &PublicKey) -> Option<TimestampedMuteList> {
         {
             let mut cache_mutex_guard = self.cache.lock().await;
             if let Ok(optional_mute_list) = cache_mutex_guard.get_mute_list(pubkey) {
                 return optional_mute_list;
             }
         }   // Release the lock here for improved performance
-        
+
         // We don't have an answer from the cache, so we need to fetch it
         let mute_list_event = self.fetch_single_event(pubkey, Kind::MuteList).await;
         let mut cache_mutex_guard = self.cache.lock().await;
         cache_mutex_guard.add_optional_mute_list_with_author(pubkey, mute_list_event.clone());
-        mute_list_event?.to_mute_list()
+        Some(mute_list_event?.to_timestamped_mute_list()?)
+    }
+
+    pub async fn get_relay_list(&self, pubkey: &PublicKey) -> Option<RelayList> {
+        {
+            let mut cache_mutex_guard = self.cache.lock().await;
+            if let Ok(optional_relay_list) = cache_mutex_guard.get_relay_list(pubkey) {
+                return optional_relay_list;
+            }
+        }   // Release the lock here for improved performance
+
+        // We don't have an answer from the cache, so we need to fetch it
+        let relay_list_event = NostrNetworkHelper::fetch_single_event_from_client(pubkey, Kind::RelayList, &self.bootstrap_client).await;
+        let mut cache_mutex_guard = self.cache.lock().await;
+        cache_mutex_guard.add_optional_relay_list_with_author(pubkey, relay_list_event.clone());
+        relay_list_event?.to_relay_list()
     }
 
     pub async fn get_contact_list(&self, pubkey: &PublicKey) -> Option<Event> {
@@ -113,7 +85,7 @@ impl NostrNetworkHelper {
                 return optional_contact_list;
             }
         }   // Release the lock here for improved performance
-        
+
         // We don't have an answer from the cache, so we need to fetch it
         let contact_list_event = self.fetch_single_event(pubkey, Kind::ContactList).await;
         let mut cache_mutex_guard = self.cache.lock().await;
@@ -124,19 +96,53 @@ impl NostrNetworkHelper {
     // MARK: - Lower level fetching functions
 
     async fn fetch_single_event(&self, author: &PublicKey, kind: Kind) -> Option<Event> {
+        let event = match self.make_client_for(author).await {
+            Some(client) => {
+                NostrNetworkHelper::fetch_single_event_from_client(author, kind, &client).await
+            },
+            None => {
+                NostrNetworkHelper::fetch_single_event_from_client(author, kind, &self.bootstrap_client).await
+            },
+        };
+        // Save event to our database if needed
+        if let Some(event) = event.clone() {
+            if let Err(error) = self.event_saver.save_if_needed(&event).await {
+                log::warn!("Failed to save event '{:?}'. Error: {:?}", event.id.to_hex(), error)
+            }
+        }
+        event
+    }
+
+    async fn make_client_for(&self, author: &PublicKey) -> Option<Client> {
+        let client = Client::new(&Keys::generate());
+
+        let relay_list = self.get_relay_list(author).await?;
+        for (url, metadata) in relay_list {
+            if metadata.map_or(true, |m| m == RelayMetadata::Write) {   // Only add "write" relays, as per NIP-65 spec on reading data FROM user
+                if let Err(e) = client.add_relay(url.clone()).await {
+                    log::warn!("Failed to add relay URL: {:?}, error: {:?}", url, e);
+                }
+            }
+        }
+
+        client.connect().await;
+
+        Some(client)
+    }
+
+    async fn fetch_single_event_from_client(author: &PublicKey, kind: Kind, client: &Client) -> Option<Event> {
         let subscription_filter = Filter::new()
             .kinds(vec![kind])
             .authors(vec![author.clone()])
             .limit(1);
-        
-        let mut notifications = self.client.notifications();
-        let this_subscription_id = self
-            .client
+
+        let mut notifications = client.notifications();
+        let this_subscription_id = client
             .subscribe(Vec::from([subscription_filter]), None)
             .await;
 
         let mut event: Option<Event> = None;
-        
+
         while let Ok(result) = timeout(NOTE_FETCH_TIMEOUT, notifications.recv()).await {
             if let Ok(notification) = result {
                 if let RelayPoolNotification::Event {
@@ -157,7 +163,7 @@ impl NostrNetworkHelper {
             log::info!("Event of kind {:?} not found for pubkey {:?}", kind, author);
         }
 
-        self.client.unsubscribe(this_subscription_id).await;
+        client.unsubscribe(this_subscription_id).await;
         event
     }
 }

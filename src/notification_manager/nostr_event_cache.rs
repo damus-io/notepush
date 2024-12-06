@@ -1,11 +1,10 @@
-use crate::utils::time_delta::TimeDelta;
+use crate::{notification_manager::nostr_event_extensions::MaybeConvertibleToTimestampedMuteList, utils::time_delta::TimeDelta};
 use tokio::time::Duration;
 use nostr_sdk::prelude::*;
 use std::collections::HashMap;
 use std::sync::Arc;
 use log;
-
-use super::nostr_event_extensions::MaybeConvertibleToMuteList;
+use super::nostr_event_extensions::{MaybeConvertibleToRelayList, RelayList, TimestampedMuteList};
 
 struct CacheEntry {
     event: Option<Event>,   // `None` means the event does not exist as far as we know (It does NOT mean expired)
@@ -23,6 +22,7 @@ pub struct Cache {
     entries: HashMap<EventId, Arc<CacheEntry>>,
     mute_lists: HashMap<PublicKey, Arc<CacheEntry>>,
     contact_lists: HashMap<PublicKey, Arc<CacheEntry>>,
+    relay_lists: HashMap<PublicKey, Arc<CacheEntry>>,
     max_age: Duration,
 }
 
@@ -34,12 +34,13 @@ impl Cache {
             entries: HashMap::new(),
             mute_lists: HashMap::new(),
             contact_lists: HashMap::new(),
+            relay_lists: HashMap::new(),
             max_age,
         }
     }
 
     // MARK: - Adding items to the cache
-    
+
     pub fn add_optional_mute_list_with_author(&mut self, author: &PublicKey, mute_list: Option<Event>) {
         if let Some(mute_list) = mute_list {
             self.add_event(mute_list);
@@ -53,7 +54,21 @@ impl Cache {
             );
         }
     }
-    
+
+    pub fn add_optional_relay_list_with_author(&mut self, author: &PublicKey, relay_list_event: Option<Event>) {
+        if let Some(relay_list_event) = relay_list_event {
+            self.add_event(relay_list_event);
+        } else {
+            self.relay_lists.insert(
+                author.clone(),
+                Arc::new(CacheEntry {
+                    event: None,
+                    added_at: nostr::Timestamp::now(),
+                }),
+            );
+        }
+    }
+
     pub fn add_optional_contact_list_with_author(&mut self, author: &PublicKey, contact_list: Option<Event>) {
         if let Some(contact_list) = contact_list {
             self.add_event(contact_list);
@@ -84,23 +99,27 @@ impl Cache {
                 self.contact_lists
                     .insert(event.pubkey.clone(), entry.clone());
                 log::debug!("Added contact list to the cache. Event ID: {}", event.id.to_hex());
-            }
+            },
+            Kind::RelayList => {
+                self.relay_lists.insert(event.pubkey.clone(), entry.clone());
+                log::debug!("Added relay list to the cache. Event ID: {}", event.id.to_hex());
+            },
             _ => {
-                log::debug!("Added event to the cache. Event ID: {}", event.id.to_hex());
+                log::debug!("Unknown event kind, not adding to any cache. Event ID: {}", event.id.to_hex());
             }
         }
     }
 
     // MARK: - Fetching items from the cache
 
-    pub fn get_mute_list(&mut self, pubkey: &PublicKey) -> Result<Option<MuteList>, CacheError> {
+    pub fn get_mute_list(&mut self, pubkey: &PublicKey) -> Result<Option<TimestampedMuteList>, CacheError> {
         if let Some(entry) = self.mute_lists.get(pubkey) {
             let entry = entry.clone();  // Clone the Arc to avoid borrowing issues
             if !entry.is_expired(self.max_age) {
                 match &entry.event {
                     Some(event) => {
                         log::debug!("Cached mute list for pubkey {} was found", pubkey.to_hex());
-                        return Ok(event.to_mute_list());
+                        return Ok(event.to_timestamped_mute_list());
                     }
                     None => {
                         log::debug!("Empty mute list cache entry for pubkey {}", pubkey.to_hex());
@@ -114,6 +133,22 @@ impl Cache {
             }
         }
         log::debug!("Mute list for pubkey {} not found on cache", pubkey.to_hex());
+        Err(CacheError::NotFound)
+    }
+
+    pub fn get_relay_list(&mut self, pubkey: &PublicKey) -> Result<Option<RelayList>, CacheError> {
+        if let Some(entry) = self.relay_lists.get(pubkey) {
+            let entry = entry.clone();  // Clone the Arc to avoid borrowing issues
+            if !entry.is_expired(self.max_age) {
+                if let Some(event) = entry.event.clone() {
+                    return Ok(event.to_relay_list());
+                }
+            } else {
+                log::debug!("Relay list for pubkey {} is expired, removing it from the cache", pubkey.to_hex());
+                self.mute_lists.remove(pubkey);
+                self.remove_event_from_all_maps(&entry.event);
+            }
+        }
         Err(CacheError::NotFound)
     }
 
