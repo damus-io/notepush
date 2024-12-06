@@ -1,5 +1,5 @@
-use crate::{notification_manager::nostr_event_extensions::MaybeConvertibleToTimestampedMuteList, utils::time_delta::TimeDelta};
-use tokio::time::Duration;
+use crate::{notification_manager::nostr_event_extensions::MaybeConvertibleToTimestampedMuteList};
+use tokio::time::{Duration, Instant};
 use nostr_sdk::prelude::*;
 use std::collections::HashMap;
 use log;
@@ -7,29 +7,26 @@ use super::nostr_event_extensions::{MaybeConvertibleToRelayList, RelayList, Time
 
 struct CacheEntry<T> {
     value: Option<T>,   // `None` means the event does not exist as far as we know (It does NOT mean expired)
-    added_at: nostr::Timestamp,
+    added_at: Instant,
 }
 
 impl<T> CacheEntry<T> {
     fn is_expired(&self, max_age: Duration) -> bool {
-        let time_delta = TimeDelta::subtracting(nostr::Timestamp::now(), self.added_at);
-        time_delta.negative || (time_delta.delta_abs_seconds > max_age.as_secs())
+        self.added_at.elapsed() > max_age
     }
-}
 
-impl<T> CacheEntry<T> {
     pub fn new(value: T) -> Self {
-        let added_at = nostr::Timestamp::now();
+        let added_at = Instant::now();
         CacheEntry { value: Some(value), added_at }
     }
 
     pub fn maybe(value: Option<T>) -> Self {
-        let added_at = nostr::Timestamp::now();
+        let added_at = Instant::now();
         CacheEntry { value, added_at }
     }
 
     pub fn empty() -> Self {
-        let added_at = nostr::Timestamp::now();
+        let added_at = Instant::now();
         CacheEntry { value: None, added_at }
     }
 
@@ -149,8 +146,160 @@ impl Cache {
 }
 
 // Error type
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq)]
 pub enum CacheError {
     NotFound,
     Expired,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nostr_sdk::prelude::*;
+    use std::time::Duration;
+    use tokio::time::sleep;
+    use std::str::FromStr;
+
+    // Helper function to create a dummy event of a given kind for testing.
+    fn create_dummy_event(pubkey: PublicKey, kind: Kind) -> Event {
+        // In a real test, you might generate keys or events more dynamically.
+        let id = EventId::from_hex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
+        let created_at = Timestamp::now();
+        let content = "";
+        let sig_str = "8e1a61523765a6e577e3ca0c87afe3694ed518719aea067701c35262dd2a3c7e3ca0946fe98463a3af706dd333695ceec6cb3b29254c557c8630d3db1171ea3d";
+        let sig = Signature::from_str(sig_str).unwrap();
+
+        Event::new(id, pubkey, created_at, kind, [], content, sig)
+    }
+
+    // Helper function to create a dummy public key for testing.
+    fn create_dummy_pubkey() -> PublicKey {
+        // In a real project, you'd generate a key. For the sake of tests, just parse a known hex.
+        PublicKey::from_hex("32e1827635450ebb3c5a7d12c1f8e7b2b514439ac10a67eef3d9fd9c5c68e245").unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_add_and_retrieve_contact_list() {
+        let pubkey = create_dummy_pubkey();
+        let max_age = Duration::from_secs(60);
+        let mut cache = Cache::new(max_age);
+
+        // Initially, no contact list should be found.
+        assert!(matches!(cache.get_contact_list(&pubkey), Err(CacheError::NotFound)));
+
+        // Add a contact list event.
+        let event = create_dummy_event(pubkey, Kind::ContactList);
+        cache.add_event(&event);
+
+        // Now we should be able to retrieve it.
+        let retrieved = cache.get_contact_list(&pubkey).unwrap();
+        assert!(retrieved.is_some());
+        let retrieved_event = retrieved.unwrap();
+        assert_eq!(retrieved_event.id, event.id);
+    }
+
+    #[tokio::test]
+    async fn test_add_and_retrieve_mute_list() {
+        let pubkey = create_dummy_pubkey();
+        let max_age = Duration::from_secs(60);
+        let mut cache = Cache::new(max_age);
+
+        // No mute list initially
+        assert!(matches!(cache.get_mute_list(&pubkey), Err(CacheError::NotFound)));
+
+        // Add a mute list event.
+        let mutelist_event = {
+            let event = create_dummy_event(pubkey, Kind::MuteList);
+            event
+        };
+
+        cache.add_event(&mutelist_event);
+        let retrieved = cache.get_mute_list(&pubkey).unwrap();
+        assert!(retrieved.is_some()); // Should have a Some(TimestampedMuteList) now
+    }
+
+    #[tokio::test]
+    async fn test_add_and_retrieve_relay_list() {
+        let pubkey = create_dummy_pubkey();
+        let max_age = Duration::from_secs(60);
+        let mut cache = Cache::new(max_age);
+
+        // No relay list initially
+        assert!(matches!(cache.get_relay_list(&pubkey), Err(CacheError::NotFound)));
+
+        // Add a relay list event.
+        let relaylist_event = create_dummy_event(pubkey, Kind::RelayList);
+        cache.add_event(&relaylist_event);
+
+        let retrieved = cache.get_relay_list(&pubkey).unwrap();
+        assert!(retrieved.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_expired_entries() {
+        // Very short max_age to test expiration logic quickly.
+        let max_age = Duration::from_millis(100);
+        let pubkey = create_dummy_pubkey();
+        let mut cache = Cache::new(max_age);
+
+        // Add a contact list event that will expire soon.
+        let event = create_dummy_event(pubkey, Kind::ContactList);
+        cache.add_event(&event);
+
+        // Initially, we can retrieve it.
+        let retrieved = cache.get_contact_list(&pubkey).unwrap();
+        assert!(retrieved.is_some());
+
+        // Wait for it to expire.
+        sleep(Duration::from_millis(200)).await;
+
+        // Now it should be expired and removed.
+        let result = cache.get_contact_list(&pubkey);
+        assert_eq!(result, Err(CacheError::Expired));
+    }
+
+    #[tokio::test]
+    async fn test_empty_entries() {
+        let pubkey = create_dummy_pubkey();
+        let max_age = Duration::from_secs(60);
+        let mut cache = Cache::new(max_age);
+
+        // Add empty mute list
+        cache.add_optional_mute_list_with_author(&pubkey, None);
+
+        // We should now find a mute list entry, but it's None.
+        let result = cache.get_mute_list(&pubkey).unwrap();
+        assert!(result.is_none());
+
+        // Add empty contact list
+        cache.add_optional_contact_list_with_author(&pubkey, None);
+
+        let result = cache.get_contact_list(&pubkey).unwrap();
+        assert!(result.is_none());
+
+        // Add empty relay list
+        cache.add_optional_relay_list_with_author(&pubkey, None);
+
+        let result = cache.get_relay_list(&pubkey).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_re_insertion() {
+        let pubkey = create_dummy_pubkey();
+        let max_age = Duration::from_secs(60);
+        let mut cache = Cache::new(max_age);
+
+        // Insert empty first
+        cache.add_optional_contact_list_with_author(&pubkey, None);
+        assert!(cache.get_contact_list(&pubkey).unwrap().is_none());
+
+        // Now insert a real event
+        let event = create_dummy_event(pubkey, Kind::ContactList);
+        cache.add_event(&event);
+
+        // It should now return the actual event
+        let retrieved = cache.get_contact_list(&pubkey).unwrap().unwrap();
+        assert_eq!(retrieved.id, event.id);
+    }
 }
