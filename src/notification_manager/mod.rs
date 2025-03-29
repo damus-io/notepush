@@ -3,6 +3,7 @@ mod nostr_event_extensions;
 pub mod nostr_network_helper;
 pub mod utils;
 
+use std::cmp::{max, min};
 use nostr_event_extensions::{ExtendedEvent, SqlStringConvertible};
 
 use a2::{Client, ClientConfig, DefaultNotificationBuilder, NotificationBuilder};
@@ -28,6 +29,13 @@ use std::fs::File;
 use utils::should_mute_notification_for_mutelist;
 
 // MARK: - NotificationManager
+
+// Default threshold of the hellthread pubkey tag count setting if it is not set.
+const DEFAULT_HELLTHREAD_MAX_PUBKEYS: i8 = 10;
+// Minimum threshold the hellthread pubkey tag count setting can go down to.
+const HELLTHREAD_MIN_PUBKEYS: i8 = 6;
+// Maximum threshold the hellthread pubkey tag count setting can go up to.
+const HELLTHREAD_MAX_PUBKEYS: i8 = 24;
 
 pub struct NotificationManager {
     db: Arc<Mutex<r2d2::Pool<SqliteConnectionManager>>>,
@@ -262,6 +270,20 @@ impl NotificationManager {
             "BOOLEAN",
             Some("false"),
         )?;
+        Self::add_column_if_not_exists(
+            db,
+            "user_info",
+            "hellthread_notifications_disabled",
+            "BOOLEAN",
+            None,
+        )?;
+        Self::add_column_if_not_exists(
+            db,
+            "user_info",
+            "hellthread_notifications_max_pubkeys",
+            "TINYINT",
+            None,
+        )?;
 
         // Migration related to mute list improvements (https://github.com/damus-io/damus/issues/2118)
 
@@ -454,6 +476,24 @@ impl NotificationManager {
         event.relevant_pubkeys()
     }
 
+    fn pubkeys_referenced_by_event(&self, event: &Event) -> HashSet<PublicKey> {
+        event.referenced_pubkeys()
+    }
+
+    fn is_hellthread_eligible(&self, event_kind: Kind) -> bool {
+        match event_kind {
+            Kind::TextNote => true,
+            Kind::EncryptedDirectMessage => false,
+            Kind::Repost => true,
+            Kind::GenericRepost => true,
+            Kind::Reaction => true,
+            Kind::ZapPrivateMessage => false,
+            Kind::ZapRequest => false,
+            Kind::ZapReceipt => true,
+            _ => false,
+        }
+    }
+
     async fn send_event_notifications_to_pubkey(
         &self,
         event: &Event,
@@ -489,6 +529,15 @@ impl NotificationManager {
                 .await
         {
             return Ok(false);
+        }
+        if notification_preferences.hellthread_notifications_disabled
+            && self.is_hellthread_eligible(event.kind())
+        {
+            if let Ok(pubkeys_count) = i8::try_from(self.pubkeys_referenced_by_event(event).len()) {
+                if pubkeys_count > notification_preferences.hellthread_notifications_max_pubkeys {
+                    return Ok(false);
+                }
+            }
         }
         match event.kind {
             Kind::TextNote => Ok(notification_preferences.mention_notifications_enabled), // TODO: Not 100% accurate
@@ -687,7 +736,7 @@ impl NotificationManager {
         let db_mutex_guard = self.db.lock().await;
         let connection = db_mutex_guard.get()?;
         let mut stmt = connection.prepare(
-            "SELECT zap_notifications_enabled, mention_notifications_enabled, repost_notifications_enabled, reaction_notifications_enabled, dm_notifications_enabled, only_notifications_from_following_enabled FROM user_info WHERE pubkey = ? AND device_token = ?",
+            "SELECT zap_notifications_enabled, mention_notifications_enabled, repost_notifications_enabled, reaction_notifications_enabled, dm_notifications_enabled, only_notifications_from_following_enabled, hellthread_notifications_disabled, hellthread_notifications_max_pubkeys FROM user_info WHERE pubkey = ? AND device_token = ?",
         )?;
         let settings = stmt.query_row([pubkey.to_sql_string(), device_token], |row| {
             Ok(UserNotificationSettings {
@@ -697,6 +746,8 @@ impl NotificationManager {
                 reaction_notifications_enabled: row.get(3)?,
                 dm_notifications_enabled: row.get(4)?,
                 only_notifications_from_following_enabled: row.get(5)?,
+                hellthread_notifications_disabled: row.get::<_, Option<bool>>(6)?.unwrap_or(false),
+                hellthread_notifications_max_pubkeys: row.get::<_, Option<i8>>(7)?.unwrap_or(DEFAULT_HELLTHREAD_MAX_PUBKEYS),
             })
         })?;
 
@@ -712,7 +763,7 @@ impl NotificationManager {
         let db_mutex_guard = self.db.lock().await;
         let connection = db_mutex_guard.get()?;
         connection.execute(
-            "UPDATE user_info SET zap_notifications_enabled = ?, mention_notifications_enabled = ?, repost_notifications_enabled = ?, reaction_notifications_enabled = ?, dm_notifications_enabled = ?, only_notifications_from_following_enabled = ? WHERE pubkey = ? AND device_token = ?",
+            "UPDATE user_info SET zap_notifications_enabled = ?, mention_notifications_enabled = ?, repost_notifications_enabled = ?, reaction_notifications_enabled = ?, dm_notifications_enabled = ?, only_notifications_from_following_enabled = ?, hellthread_notifications_disabled = ?, hellthread_notifications_max_pubkeys = ? WHERE pubkey = ? AND device_token = ?",
             params![
                 settings.zap_notifications_enabled,
                 settings.mention_notifications_enabled,
@@ -720,6 +771,8 @@ impl NotificationManager {
                 settings.reaction_notifications_enabled,
                 settings.dm_notifications_enabled,
                 settings.only_notifications_from_following_enabled,
+                settings.hellthread_notifications_disabled,
+                max(HELLTHREAD_MIN_PUBKEYS, min(HELLTHREAD_MAX_PUBKEYS, settings.hellthread_notifications_max_pubkeys)),
                 pubkey.to_sql_string(),
                 device_token,
             ],
@@ -727,6 +780,11 @@ impl NotificationManager {
         Ok(())
     }
 }
+
+fn default_hellthread_max_pubkeys() -> i8 {
+    DEFAULT_HELLTHREAD_MAX_PUBKEYS
+}
+
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct UserNotificationSettings {
@@ -736,6 +794,12 @@ pub struct UserNotificationSettings {
     reaction_notifications_enabled: bool,
     dm_notifications_enabled: bool,
     only_notifications_from_following_enabled: bool,
+
+    #[serde(default)]
+    hellthread_notifications_disabled: bool,
+
+    #[serde(default = "default_hellthread_max_pubkeys")]
+    hellthread_notifications_max_pubkeys: i8,
 }
 
 struct NotificationStatus {
