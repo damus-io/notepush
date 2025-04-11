@@ -323,6 +323,13 @@ impl NotificationManager {
             return Ok(());
         }
 
+        // Allow notes that are created no more than 3 seconds in the future
+        // to account for natural clock skew between sender and receiver.
+        if event.created_at > Timestamp::now() + 3 {
+            log::debug!("Event was scheduled for the future, not sending notifications");
+            return Ok(());
+        }
+
         if !Self::is_event_kind_supported(event.kind) {
             log::debug!("Event kind is not supported, not sending notifications");
             return Ok(());
