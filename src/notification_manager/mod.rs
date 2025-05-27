@@ -598,6 +598,7 @@ ALTER TABLE user_info drop column dm_notifications_enabled;",
                 .iter()
                 .find(|t| {
                     t.kind() == TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::P))
+                        && t.as_vec().len() > 3
                         && t.as_vec()[3] == "host"
                 })
                 .and_then(|t| PublicKey::from_hex(t.content()?).ok())
@@ -697,7 +698,7 @@ ALTER TABLE user_info drop column dm_notifications_enabled;",
         let db_mutex_guard = self.db.lock().await;
         let connection = db_mutex_guard.get()?;
         let mut stmt =
-            connection.prepare("SELECT user_pubkey FROM notify_keys WHERE target_pubkey = ?")?;
+            connection.prepare("SELECT user_pubkey,kinds FROM notify_keys WHERE target_pubkey = ?")?;
         let pubkeys = stmt
             .query_map([target.to_sql_string()], |row| {
                 let key = PublicKey::from_hex(row.get::<_, String>(0)?.as_str())
