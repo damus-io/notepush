@@ -2,7 +2,7 @@
 
 use hyper_util::rt::TokioIo;
 use nostr::{Filter, Timestamp};
-use nostr_sdk::{Client, RelayPoolNotification};
+use nostr_sdk::{Client, RelayPoolNotification, RelayStatus};
 use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Duration;
@@ -133,7 +133,8 @@ async fn pull_events(
         .subscribe(
             vec![Filter::default()
                 .kinds(NotificationManager::supported_kinds())
-                .since(Timestamp::now())],
+                .since(Timestamp::now())
+                .limit(1)],
             None,
         )
         .await;
@@ -147,7 +148,15 @@ async fn pull_events(
                 }
             }
             RelayPoolNotification::Message { .. } => {}
-            RelayPoolNotification::RelayStatus { .. } => {}
+            RelayPoolNotification::RelayStatus { relay_url, status } => match status {
+                RelayStatus::Connected => {
+                    log::info!("Connected to {}", relay_url);
+                }
+                RelayStatus::Disconnected => {
+                    log::info!("Relay connection lost {}", relay_url);
+                }
+                _ => {}
+            },
             RelayPoolNotification::Stop => {}
             RelayPoolNotification::Shutdown => {}
         }
