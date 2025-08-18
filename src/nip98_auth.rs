@@ -1,16 +1,15 @@
-use super::utils::time_delta::TimeDelta;
 use base64::prelude::*;
-use nostr::bitcoin::hashes::sha256::Hash as Sha256Hash;
-use nostr::bitcoin::hashes::Hash;
-use nostr::util::hex;
-use serde_json::Value;
+use nostr_sdk::hashes::{sha256, Hash};
+use nostr_sdk::prelude::hex;
+use nostr_sdk::{Event, JsonUtil, Kind, TagKind, Timestamp};
+use std::borrow::Cow;
 
 pub fn nip98_verify_auth_header(
     auth_header: &str,
     url: &str,
     method: &str,
     body: &Option<Vec<u8>>,
-) -> Result<nostr::Event, &'static str> {
+) -> Result<Event, &'static str> {
     if auth_header.is_empty() {
         return Err("Nostr authorization header missing");
     }
@@ -33,24 +32,23 @@ pub fn nip98_verify_auth_header(
         .decode(base64_encoded_note.as_bytes())
         .map_err(|_| "Failed to decode base64 encoded note from Nostr authorization header")?;
 
-    let note_value: Value = serde_json::from_slice(&decoded_note_json)
-        .map_err(|_| "Could not parse JSON note from authorization header")?;
+    let note =
+        Event::from_json(decoded_note_json).map_err(|_| "Could not parse Nostr note from JSON")?;
 
-    let note: nostr::Event =
-        nostr::Event::from_value(note_value).map_err(|_| "Could not parse Nostr note from JSON")?;
-
-    if note.kind != nostr::Kind::HttpAuth {
+    if note.kind != Kind::HttpAuth {
         return Err("Nostr note kind in authorization header is incorrect");
     }
 
     let authorized_url = note
-        .get_tag_content(nostr::TagKind::SingleLetter(
-            nostr::SingleLetterTag::lowercase(nostr::Alphabet::U),
-        ))
+        .tags
+        .find(TagKind::Custom(Cow::Borrowed("u")))
+        .and_then(|t| t.content())
         .ok_or_else(|| "Missing 'u' tag from Nostr authorization header")?;
 
     let authorized_method = note
-        .get_tag_content(nostr::TagKind::Method)
+        .tags
+        .find(TagKind::Method)
+        .and_then(|t| t.content())
         .ok_or_else(|| "Missing 'method' tag from Nostr authorization header")?;
 
     if authorized_url != url || authorized_method != method {
@@ -64,12 +62,9 @@ pub fn nip98_verify_auth_header(
         return Err("Auth note url and/or method does not match request");
     }
 
-    let current_time: nostr::Timestamp = nostr::Timestamp::now();
-    let note_created_at: nostr::Timestamp = note.created_at();
-    let time_delta = TimeDelta::subtracting(current_time, note_created_at);
-    if (time_delta.negative && time_delta.delta_abs_seconds > 30)
-        || (!time_delta.negative && time_delta.delta_abs_seconds > 60)
-    {
+    let current_time = Timestamp::now().as_u64();
+    let time_delta = note.created_at.as_u64().abs_diff(current_time);
+    if time_delta > 60 {
         log::warn!(
             "Auth timestamp out of range: Time delta: {} seconds",
             time_delta
@@ -79,21 +74,23 @@ pub fn nip98_verify_auth_header(
 
     if let Some(body_data) = body {
         let authorized_content_hash_bytes: Vec<u8> = hex::decode(
-            note.get_tag_content(nostr::TagKind::Payload)
+            note.tags
+                .find(TagKind::Payload)
+                .and_then(|t| t.content())
                 .ok_or("Missing 'payload' tag from Nostr authorization header")?,
         )
         .map_err(|_| "Failed to decode hex encoded payload from Nostr authorization header")?;
 
-        let authorized_content_hash: Sha256Hash =
-            Sha256Hash::from_slice(&authorized_content_hash_bytes)
-                .map_err(|_| "Failed to convert hex encoded payload to Sha256Hash")?;
+        let authorized_content_hash = sha256::Hash::from_slice(&authorized_content_hash_bytes)
+            .map_err(|_| "Failed to convert hex encoded payload to Sha256Hash")?;
 
-        let body_hash = Sha256Hash::hash(body_data);
+        let body_hash: sha256::Hash = Hash::hash(body_data);
         if authorized_content_hash != body_hash {
             return Err("Auth note payload hash does not match request body hash");
         }
     } else {
-        let authorized_content_hash_string = note.get_tag_content(nostr::TagKind::Payload);
+        let authorized_content_hash_string =
+            note.tags.find(TagKind::Payload).and_then(|t| t.content());
         if authorized_content_hash_string.is_some() {
             return Err("Auth note has payload tag but request has no body");
         }

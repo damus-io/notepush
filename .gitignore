@@ -10,3 +10,4 @@ tags
 .DS_Store
 *.p8
 *.db
+.idea/

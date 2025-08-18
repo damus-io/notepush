@@ -4,9 +4,9 @@ use futures::StreamExt;
 use hyper::upgrade::Upgraded;
 use hyper_tungstenite::{HyperWebsocket, WebSocketStream};
 use hyper_util::rt::TokioIo;
-use nostr::util::JsonUtil;
-use nostr::{ClientMessage, RelayMessage};
+use nostr_sdk::{ClientMessage, JsonUtil, RelayMessage};
 use serde_json::Value;
+use std::borrow::Cow;
 use std::fmt::{self, Debug};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -86,9 +86,7 @@ impl RelayConnection {
             let message: ClientMessage =
                 ClientMessage::from_value(Value::from_str(raw_message.to_text()?)?)?;
             let response = self.handle_client_message(message).await?;
-            stream
-                .send(tungstenite::Message::text(response.try_as_json()?))
-                .await?;
+            stream.send(Message::text(response.try_as_json()?)).await?;
         }
         Ok(())
     }
@@ -97,26 +95,24 @@ impl RelayConnection {
 
     async fn handle_client_message(
         &self,
-        message: ClientMessage,
+        message: ClientMessage<'_>,
     ) -> Result<RelayMessage, Box<dyn std::error::Error + Send + Sync>> {
         match message {
             ClientMessage::Event(event) => {
                 self.notification_manager.handle_event(&event).await?;
-                let notice_message = "blocked: This relay does not store events".to_string();
+                let notice_message = "blocked: This relay does not store events";
                 let response = RelayMessage::Ok {
                     event_id: event.id,
                     status: false,
-                    message: notice_message,
+                    message: Cow::Borrowed(notice_message),
                 };
                 Ok(response)
             }
             _ => {
                 log::info!("Received unsupported Nostr client message");
                 log::debug!("Unsupported Nostr client message: {:?}", message);
-                let notice_message = "Unsupported message.".to_string();
-                let response = RelayMessage::Notice {
-                    message: notice_message,
-                };
+                let notice_message = "Unsupported message.";
+                let response = RelayMessage::Notice(Cow::Borrowed(notice_message));
                 Ok(response)
             }
         }

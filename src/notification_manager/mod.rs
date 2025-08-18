@@ -7,10 +7,7 @@ use nostr_event_extensions::{ExtendedEvent, SqlStringConvertible};
 use std::cmp::{max, min};
 
 use a2::{Client, ClientConfig, DefaultNotificationBuilder, NotificationBuilder};
-use nostr::key::PublicKey;
-use nostr::nips::nip51::MuteList;
-use nostr::types::Timestamp;
-use nostr_sdk::{JsonUtil, Kind};
+use nostr_sdk::{Alphabet, Event, JsonUtil, Kind, PublicKey, SingleLetterTag, TagKind, Timestamp};
 use rusqlite::params;
 use serde::Deserialize;
 use serde::Serialize;
@@ -19,11 +16,11 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use fcm_service::{FcmMessage, FcmNotification, FcmService, Target, WebpushConfig};
-use nostr::{Alphabet, Event, SingleLetterTag, TagKind};
 use nostr_event_extensions::Codable;
 use nostr_event_extensions::MaybeConvertibleToMuteList;
 use nostr_event_extensions::TimestampedMuteList;
 use nostr_network_helper::NostrNetworkHelper;
+use nostr_sdk::prelude::MuteList;
 use r2d2_sqlite::SqliteConnectionManager;
 use std::fs::File;
 use std::str::FromStr;
@@ -110,26 +107,26 @@ impl EventSaver {
         Self { db }
     }
 
-    pub async fn save_if_needed(&self, event: &nostr::Event) -> NResult<bool> {
+    pub async fn save_if_needed(&self, event: &Event) -> NResult<bool> {
         match event.to_mute_list() {
             Some(mute_list) => {
                 match self
-                    .get_saved_mute_list_for(event.author())
+                    .get_saved_mute_list_for(event.pubkey)
                     .await
                     .ok()
                     .flatten()
                 {
                     Some(saved_timestamped_mute_list) => {
                         let saved_mute_list_timestamp = saved_timestamped_mute_list.timestamp;
-                        if saved_mute_list_timestamp < event.created_at() {
-                            self.save_mute_list(event.author(), mute_list, event.created_at)
+                        if saved_mute_list_timestamp < event.created_at {
+                            self.save_mute_list(event.pubkey, mute_list, event.created_at)
                                 .await?;
                         } else {
                             return Ok(false);
                         }
                     }
                     None => {
-                        self.save_mute_list(event.author(), mute_list, event.created_at)
+                        self.save_mute_list(event.pubkey, mute_list, event.created_at)
                             .await?;
                     }
                 }
@@ -261,7 +258,7 @@ impl NotificationManager {
     pub async fn handle_event(&self, event: &Event) -> NResult<()> {
         log::info!(
             "Received event kind={},id={}",
-            event.kind.as_u32(),
+            event.kind.as_u16(),
             event.notification_id(),
         );
         log::debug!("Event received: {:?}", event);
@@ -434,8 +431,10 @@ ALTER TABLE user_info drop column dm_notifications_enabled;",
         let event_started = match event.kind {
             // Accept starts tag as when the stream started, otherwise use created_at timestamp
             Kind::LiveEvent => event
-                .get_tag_content(TagKind::Starts)
-                .and_then(|t| Timestamp::from_str(&t).ok())
+                .tags
+                .find(TagKind::Starts)
+                .and_then(|t| t.content())
+                .and_then(|t| Timestamp::from_str(t).ok())
                 .unwrap_or(event.created_at),
             _ => event.created_at,
         };
@@ -597,9 +596,9 @@ ALTER TABLE user_info drop column dm_notifications_enabled;",
                 .tags
                 .iter()
                 .find(|t| {
-                    t.kind() == TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::P))
-                        && t.as_vec().len() > 3
-                        && t.as_vec()[3] == "host"
+                    t.kind() == TagKind::p()
+                        && t.as_slice().len() > 3
+                        && t.as_slice()[3] == "host"
                 })
                 .and_then(|t| PublicKey::from_hex(t.content()?).ok())
                 .unwrap_or(event.pubkey),
@@ -670,13 +669,13 @@ ALTER TABLE user_info drop column dm_notifications_enabled;",
         if notification_preferences.only_notifications_from_following_enabled
             && !self
                 .nostr_network_helper
-                .does_pubkey_follow_pubkey(pubkey, &event.author())
+                .does_pubkey_follow_pubkey(pubkey, &event.pubkey)
                 .await
         {
             return Ok(false);
         }
         if notification_preferences.hellthread_notifications_disabled
-            && self.is_hellthread_eligible(event.kind())
+            && self.is_hellthread_eligible(event.kind)
         {
             if let Ok(pubkeys_count) = i8::try_from(self.pubkeys_referenced_by_event(event).len()) {
                 if pubkeys_count > notification_preferences.hellthread_notifications_max_pubkeys {
@@ -697,8 +696,8 @@ ALTER TABLE user_info drop column dm_notifications_enabled;",
     ) -> NResult<Vec<(PublicKey, Vec<Kind>)>> {
         let db_mutex_guard = self.db.lock().await;
         let connection = db_mutex_guard.get()?;
-        let mut stmt =
-            connection.prepare("SELECT user_pubkey,kinds FROM notify_keys WHERE target_pubkey = ?")?;
+        let mut stmt = connection
+            .prepare("SELECT user_pubkey,kinds FROM notify_keys WHERE target_pubkey = ?")?;
         let pubkeys = stmt
             .query_map([target.to_sql_string()], |row| {
                 let key = PublicKey::from_hex(row.get::<_, String>(0)?.as_str())
@@ -952,7 +951,7 @@ ALTER TABLE user_info drop column dm_notifications_enabled;",
                 pubkey.to_sql_string(),
                 target.to_sql_string(),
                 current_time_unix.to_sql_string(),
-                kinds.iter().map(|k| k.as_u32().to_string()).collect::<Vec<String>>().join(",")
+                kinds.iter().map(|k| k.as_u16().to_string()).collect::<Vec<String>>().join(",")
             ],
         )?;
         Ok(())
@@ -1015,7 +1014,7 @@ ALTER TABLE user_info drop column dm_notifications_enabled;",
             "UPDATE user_info SET kinds = ?, only_notifications_from_following_enabled = ?, hellthread_notifications_disabled = ?, hellthread_notifications_max_pubkeys = ? WHERE pubkey = ? AND device_token = ?",
             params![
                 settings.merge_kinds().iter()
-                    .map(|k| k.as_u32().to_string())
+                    .map(|k| k.as_u16().to_string())
                     .collect::<Vec<String>>().join(","),
                 settings.only_notifications_from_following_enabled,
                 settings.hellthread_notifications_disabled,

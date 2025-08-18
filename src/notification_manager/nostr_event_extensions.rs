@@ -1,22 +1,16 @@
-use nostr::{
-    self,
-    key::PublicKey,
-    nips::{nip51::MuteList, nip65},
-    Alphabet, SingleLetterTag,
-    TagKind::SingleLetter,
-};
-use nostr_sdk::{EventId, Kind, TagKind};
+use nostr_sdk::prelude::{MuteList, RelayMetadata};
+use nostr_sdk::{Event, EventId, Kind, PublicKey, TagKind, TagStandard, Timestamp, Url};
 
 /// Temporary scaffolding of old methods that have not been ported to use native Event methods
 pub trait ExtendedEvent {
     /// Retrieves a set of pubkeys referenced by the note
-    fn referenced_pubkeys(&self) -> std::collections::HashSet<nostr::PublicKey>;
+    fn referenced_pubkeys(&self) -> std::collections::HashSet<PublicKey>;
 
     /// Retrieves a set of pubkeys relevant to the note
-    fn relevant_pubkeys(&self) -> std::collections::HashSet<nostr::PublicKey>;
+    fn relevant_pubkeys(&self) -> std::collections::HashSet<PublicKey>;
 
     /// Retrieves a set of event IDs referenced by the note
-    fn referenced_event_ids(&self) -> std::collections::HashSet<nostr::EventId>;
+    fn referenced_event_ids(&self) -> std::collections::HashSet<EventId>;
 
     /// Retrieves a set of hashtags (t tags) referenced by the note
     fn referenced_hashtags(&self) -> std::collections::HashSet<String>;
@@ -28,48 +22,39 @@ pub trait ExtendedEvent {
 }
 
 // This is a wrapper around the Event type from strfry-policies, which adds some useful methods
-impl ExtendedEvent for nostr::Event {
+impl ExtendedEvent for Event {
     /// Retrieves a set of pubkeys referenced by the note
-    fn referenced_pubkeys(&self) -> std::collections::HashSet<nostr::PublicKey> {
-        self.get_tags_content(SingleLetter(SingleLetterTag::lowercase(Alphabet::P)))
-            .iter()
-            .filter_map(|tag| PublicKey::from_hex(tag).ok())
-            .collect()
+    fn referenced_pubkeys(&self) -> std::collections::HashSet<PublicKey> {
+        self.tags.public_keys().cloned().collect()
     }
 
     /// Retrieves a set of pubkeys relevant to the note
-    fn relevant_pubkeys(&self) -> std::collections::HashSet<nostr::PublicKey> {
+    fn relevant_pubkeys(&self) -> std::collections::HashSet<PublicKey> {
         let mut pubkeys = self.referenced_pubkeys();
         pubkeys.insert(self.pubkey);
         pubkeys
     }
 
     /// Retrieves a set of event IDs referenced by the note
-    fn referenced_event_ids(&self) -> std::collections::HashSet<nostr::EventId> {
-        self.get_tag_content(SingleLetter(SingleLetterTag::lowercase(Alphabet::E)))
-            .iter()
-            .filter_map(|tag| nostr::EventId::from_hex(tag).ok())
-            .collect()
+    fn referenced_event_ids(&self) -> std::collections::HashSet<EventId> {
+        self.tags.event_ids().cloned().collect()
     }
 
     /// Retrieves a set of hashtags (t tags) referenced by the note
     fn referenced_hashtags(&self) -> std::collections::HashSet<String> {
-        self.get_tags_content(SingleLetter(SingleLetterTag::lowercase(Alphabet::T)))
-            .iter()
-            .map(|tag| tag.to_string())
-            .collect()
+        self.tags.hashtags().map(|t| t.to_string()).collect()
     }
 
     fn notification_id(&self) -> String {
-        if self.is_parameterized_replaceable() {
+        if self.kind.is_addressable() {
             format!(
                 "{}:{}:{}",
-                self.kind.as_u32(),
+                self.kind.as_u16(),
                 self.pubkey.to_hex(),
-                self.identifier().unwrap_or("")
+                self.tags.identifier().unwrap_or("")
             )
-        } else if self.is_replaceable() {
-            format!("{}:{}", self.kind.as_u32(), self.pubkey)
+        } else if self.kind.is_replaceable() {
+            format!("{}:{}", self.kind.as_u16(), self.pubkey)
         } else {
             self.id.to_sql_string()
         }
@@ -85,34 +70,34 @@ pub trait SqlStringConvertible {
         Self: Sized;
 }
 
-impl SqlStringConvertible for nostr::EventId {
+impl SqlStringConvertible for EventId {
     fn to_sql_string(&self) -> String {
         self.to_hex()
     }
 
     fn from_sql_string(s: String) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        nostr::EventId::from_hex(s).map_err(|e| e.into())
+        EventId::from_hex(&s).map_err(|e| e.into())
     }
 }
 
-impl SqlStringConvertible for nostr::PublicKey {
+impl SqlStringConvertible for PublicKey {
     fn to_sql_string(&self) -> String {
         self.to_hex()
     }
 
     fn from_sql_string(s: String) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        PublicKey::from_hex(s).map_err(|e| e.into())
+        PublicKey::from_hex(&s).map_err(|e| e.into())
     }
 }
 
-impl SqlStringConvertible for nostr::Timestamp {
+impl SqlStringConvertible for Timestamp {
     fn to_sql_string(&self) -> String {
         self.as_u64().to_string()
     }
 
     fn from_sql_string(s: String) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let u64_timestamp: u64 = s.parse()?;
-        Ok(nostr::Timestamp::from(u64_timestamp))
+        Ok(Timestamp::from(u64_timestamp))
     }
 }
 
@@ -124,7 +109,7 @@ pub trait MaybeConvertibleToTimestampedMuteList {
     fn to_timestamped_mute_list(&self) -> Option<TimestampedMuteList>;
 }
 
-impl MaybeConvertibleToMuteList for nostr::Event {
+impl MaybeConvertibleToMuteList for Event {
     fn to_mute_list(&self) -> Option<MuteList> {
         if self.kind != Kind::MuteList {
             return None;
@@ -134,15 +119,15 @@ impl MaybeConvertibleToMuteList for nostr::Event {
             hashtags: self.referenced_hashtags().iter().cloned().collect(),
             event_ids: self.referenced_event_ids().iter().copied().collect(),
             words: self
-                .get_tags_content(TagKind::Word)
-                .iter()
-                .map(|tag| tag.to_string())
+                .tags
+                .filter(TagKind::Word)
+                .map(|t| t.content().unwrap().to_string())
                 .collect(),
         })
     }
 }
 
-impl MaybeConvertibleToTimestampedMuteList for nostr::Event {
+impl MaybeConvertibleToTimestampedMuteList for Event {
     fn to_timestamped_mute_list(&self) -> Option<TimestampedMuteList> {
         if self.kind != Kind::MuteList {
             return None;
@@ -155,22 +140,32 @@ impl MaybeConvertibleToTimestampedMuteList for nostr::Event {
     }
 }
 
-pub type RelayList = Vec<(nostr::Url, Option<nostr::nips::nip65::RelayMetadata>)>;
+pub type RelayList = Vec<(Url, Option<RelayMetadata>)>;
 
 pub trait MaybeConvertibleToRelayList {
     fn to_relay_list(&self) -> Option<RelayList>;
 }
 
-impl MaybeConvertibleToRelayList for nostr::Event {
+impl MaybeConvertibleToRelayList for Event {
     fn to_relay_list(&self) -> Option<RelayList> {
         if self.kind != Kind::RelayList {
             return None;
         }
-        let extracted_relay_list = nip65::extract_relay_list(self);
         // Convert the extracted relay list data fully into owned data that can be returned
-        let extracted_relay_list_owned = extracted_relay_list
-            .into_iter()
-            .map(|(url, metadata)| (url.clone(), metadata.clone()))
+        let extracted_relay_list_owned = self
+            .tags
+            .iter()
+            .filter_map(|tag| {
+                if let Some(TagStandard::RelayMetadata {
+                    relay_url,
+                    metadata,
+                }) = tag.as_standardized()
+                {
+                    Some((relay_url.clone().into(), metadata.clone()))
+                } else {
+                    None
+                }
+            })
             .collect();
 
         Some(extracted_relay_list_owned)
@@ -258,13 +253,13 @@ impl Codable for MuteList {
 #[derive(Clone)]
 pub struct TimestampedMuteList {
     pub mute_list: MuteList,
-    pub timestamp: nostr::Timestamp,
+    pub timestamp: Timestamp,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nostr::{Event, PublicKey};
+    use {Event, PublicKey};
 
     #[test]
     fn test_relevant_pubkeys() {

@@ -1,8 +1,10 @@
 #![forbid(unsafe_code)]
 
 use hyper_util::rt::TokioIo;
-use nostr::{Filter, Timestamp};
-use nostr_sdk::{Client, RelayPoolNotification, RelayStatus};
+use log::warn;
+use nostr_sdk::{
+    Client, Filter, RelayMessage, RelayPoolNotification, RelayStatus, SubscribeOptions, Timestamp,
+};
 use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Duration;
@@ -122,22 +124,22 @@ async fn pull_events(
     mgr: Arc<NotificationManager>,
     relays: &Vec<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let client = Client::new(nostr_sdk::key::Keys::generate());
+    let client = Client::builder().build();
     for relay in relays {
         client.add_relay(relay).await?;
     }
     client.connect().await;
 
+    let filter = Filter::default()
+        .kinds(NotificationManager::supported_kinds())
+        .since(Timestamp::now())
+        .limit(1);
+
     // request supported kinds from all relays
-    client
-        .subscribe(
-            vec![Filter::default()
-                .kinds(NotificationManager::supported_kinds())
-                .since(Timestamp::now())
-                .limit(1)],
-            None,
-        )
-        .await;
+    let _sub = client
+        .pool()
+        .subscribe(filter, SubscribeOptions::default())
+        .await?;
 
     let mut notif = client.notifications();
     while let Ok(msg) = notif.recv().await {
@@ -148,18 +150,10 @@ async fn pull_events(
                 }
             }
             RelayPoolNotification::Message { .. } => {}
-            RelayPoolNotification::RelayStatus { relay_url, status } => match status {
-                RelayStatus::Connected => {
-                    log::info!("Connected to {}", relay_url);
-                }
-                RelayStatus::Disconnected => {
-                    log::info!("Relay connection lost {}", relay_url);
-                }
-                _ => {}
-            },
-            RelayPoolNotification::Stop => {}
             RelayPoolNotification::Shutdown => {}
         }
     }
+
+    warn!("event pull exited unexpectedly");
     Ok(())
 }

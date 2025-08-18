@@ -1,6 +1,6 @@
 use super::nostr_event_extensions::ExtendedEvent;
-use nostr::nips::nip51::MuteList;
 use nostr_sdk::Event;
+use nostr_sdk::prelude::MuteList;
 
 pub fn should_mute_notification_for_mutelist(event: &Event, mute_list: &MuteList) -> bool {
     for muted_public_key in &mute_list.public_keys {

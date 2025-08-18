@@ -160,32 +160,15 @@ impl NostrNetworkHelper {
             .authors(vec![*author])
             .limit(1);
 
-        let mut notifications = client.notifications();
-        let this_subscription_id = client
-            .subscribe(Vec::from([subscription_filter]), None)
-            .await;
+        let event = client
+            .fetch_events(subscription_filter, NOTE_FETCH_TIMEOUT)
+            .await
+            .ok()?;
 
-        let mut event: Option<Event> = None;
-
-        while let Ok(result) = timeout(NOTE_FETCH_TIMEOUT, notifications.recv()).await {
-            if let Ok(RelayPoolNotification::Event {
-                subscription_id,
-                event: event_option,
-                ..
-            }) = result
-            {
-                if this_subscription_id == subscription_id && event_option.kind == kind {
-                    event = Some((*event_option).clone());
-                    break;
-                }
-            }
-        }
-
-        if event.is_none() {
+        if event.is_empty() {
             log::info!("Event of kind {:?} not found for pubkey {:?}", kind, author);
         }
 
-        client.unsubscribe(this_subscription_id).await;
-        event
+        event.into_iter().next()
     }
 }

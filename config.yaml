@@ -9,11 +9,11 @@
 
 # FCM config to send notifications
 fcm:
-  google_services_file_path: "./google-services.json"
+  google_services_file_path: "/home/kieran/Downloads/nostrlabs-8b41540cd7b2.json"
   vaapi_key: my_vaapi_pubkey
 
 # Public URL of this service
-api_base_url: http://localhost:8000
+api_base_url: http://10.0.2.2:8000
 
 # Relay to pull profile data from (Mute lists)
 relay_url: wss://relay.damus.io
