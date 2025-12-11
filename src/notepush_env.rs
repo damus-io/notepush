@@ -5,7 +5,8 @@ const DEFAULT_DB_PATH: &str = "./apns_notifications.db";
 const DEFAULT_HOST: &str = "0.0.0.0";
 const DEFAULT_PORT: &str = "8000";
 const DEFAULT_RELAY_URL: &str = "wss://relay.damus.io";
-const DEFAULT_NOSTR_EVENT_CACHE_MAX_AGE: u64 = 60 * 60; // 1 hour
+const DEFAULT_NOSTR_EVENT_CACHE_MAX_AGE: u64 = 30 * 60; // 30 minutes
+const DEFAULT_NOSTR_EVENT_CACHE_MAX_ENTRIES: usize = 10_000;
 
 pub struct NotePushEnv {
     // The path to the Apple private key .p8 file
@@ -28,6 +29,8 @@ pub struct NotePushEnv {
     pub relay_url: String,
     // The max age of the Nostr event cache, in seconds
     pub nostr_event_cache_max_age: std::time::Duration,
+    // The max number of cached entries per cache to prevent unbounded growth
+    pub nostr_event_cache_max_entries: usize,
 }
 
 impl NotePushEnv {
@@ -56,6 +59,10 @@ impl NotePushEnv {
             .unwrap_or(std::time::Duration::from_secs(
                 DEFAULT_NOSTR_EVENT_CACHE_MAX_AGE,
             ));
+        let nostr_event_cache_max_entries = env::var("NOSTR_EVENT_CACHE_MAX_ENTRIES")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(DEFAULT_NOSTR_EVENT_CACHE_MAX_ENTRIES);
 
         Ok(NotePushEnv {
             apns_private_key_path,
@@ -69,6 +76,7 @@ impl NotePushEnv {
             api_base_url,
             relay_url,
             nostr_event_cache_max_age,
+            nostr_event_cache_max_entries,
         })
     }
 

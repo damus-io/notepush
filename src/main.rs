@@ -38,6 +38,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             env.apns_environment.clone(),
             env.apns_topic.clone(),
             env.nostr_event_cache_max_age,
+            env.nostr_event_cache_max_entries,
         )
         .await
         .expect("Failed to create notification manager"),
