@@ -20,6 +20,7 @@ impl NostrNetworkHelper {
     pub async fn new(
         relay_url: String,
         cache_max_age: Duration,
+        cache_max_entries: usize,
         event_saver: EventSaver,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let client = Client::new(Keys::generate());
@@ -27,7 +28,7 @@ impl NostrNetworkHelper {
         client.connect().await;
         Ok(NostrNetworkHelper {
             bootstrap_client: client,
-            cache: Mutex::new(Cache::new(cache_max_age)),
+            cache: Mutex::new(Cache::new(cache_max_age, cache_max_entries)),
             event_saver,
         })
     }

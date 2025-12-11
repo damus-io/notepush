@@ -46,6 +46,7 @@ pub struct Cache {
     contact_lists: HashMap<PublicKey, CacheEntry<Event>>,
     relay_lists: HashMap<PublicKey, CacheEntry<RelayList>>,
     max_age: Duration,
+    max_entries: usize,
 }
 
 fn get_cache_entry<T: Clone>(
@@ -76,17 +77,82 @@ fn get_cache_entry<T: Clone>(
     res
 }
 
+fn remove_expired_from<T>(
+    max_age: Duration,
+    name: &str,
+    map: &mut HashMap<PublicKey, CacheEntry<T>>,
+) {
+    let expired_keys: Vec<PublicKey> = map
+        .iter()
+        .filter(|(_, entry)| entry.is_expired(max_age))
+        .map(|(pubkey, _)| pubkey.to_owned())
+        .collect();
+
+    if expired_keys.is_empty() {
+        return;
+    }
+
+    for pubkey in expired_keys {
+        log::debug!(
+            "{} list for pubkey {} expired, pruning from cache",
+            name,
+            pubkey.to_hex()
+        );
+        map.remove(&pubkey);
+    }
+}
+
+fn enforce_cap<T>(
+    max_entries: usize,
+    name: &str,
+    map: &mut HashMap<PublicKey, CacheEntry<T>>,
+) {
+    if map.len() <= max_entries {
+        return;
+    }
+
+    // Remove oldest entries first based on insertion time to respect cap.
+    let mut entries: Vec<(PublicKey, Instant)> = map
+        .iter()
+        .map(|(pubkey, entry)| (pubkey.to_owned(), entry.added_at))
+        .collect();
+
+    entries.sort_by_key(|(_, added_at)| *added_at);
+
+    let remove_count = map.len() - max_entries;
+    for (pubkey, _) in entries.into_iter().take(remove_count) {
+        log::debug!(
+            "{} cache over cap ({}). Evicting pubkey {}.",
+            name,
+            max_entries,
+            pubkey.to_hex()
+        );
+        map.remove(&pubkey);
+    }
+}
+
 impl Cache {
     // MARK: - Initialization
 
-    pub fn new(max_age: Duration) -> Self {
+    pub fn new(max_age: Duration, max_entries: usize) -> Self {
         Cache {
             //entries: HashMap::new(),
             mute_lists: HashMap::new(),
             contact_lists: HashMap::new(),
             relay_lists: HashMap::new(),
             max_age,
+            max_entries,
         }
+    }
+
+    /// Remove expired entries across all caches so we don't retain stale keys forever.
+    /// This runs eagerly before add/get operations rather than waiting for callers to
+    /// request a specific key (which could leave expired keys resident indefinitely).
+    pub fn prune_expired_entries(&mut self) {
+        let max_age = self.max_age;
+        remove_expired_from(max_age, "Mute", &mut self.mute_lists);
+        remove_expired_from(max_age, "Contact", &mut self.contact_lists);
+        remove_expired_from(max_age, "Relay", &mut self.relay_lists);
     }
 
     // MARK: - Adding items to the cache
@@ -96,12 +162,14 @@ impl Cache {
         author: &PublicKey,
         mute_list: Option<&Event>,
     ) {
+        self.prune_expired_entries();
         if let Some(mute_list) = mute_list {
             self.add_event(mute_list);
         } else {
             self.mute_lists
                 .insert(author.to_owned(), CacheEntry::empty());
         }
+        enforce_cap(self.max_entries, "Mute", &mut self.mute_lists);
     }
 
     pub fn add_optional_relay_list_with_author(
@@ -109,12 +177,14 @@ impl Cache {
         author: &PublicKey,
         relay_list_event: Option<&Event>,
     ) {
+        self.prune_expired_entries();
         if let Some(relay_list_event) = relay_list_event {
             self.add_event(relay_list_event);
         } else {
             self.relay_lists
                 .insert(author.to_owned(), CacheEntry::empty());
         }
+        enforce_cap(self.max_entries, "Relay", &mut self.relay_lists);
     }
 
     pub fn add_optional_contact_list_with_author(
@@ -122,15 +192,18 @@ impl Cache {
         author: &PublicKey,
         contact_list: Option<&Event>,
     ) {
+        self.prune_expired_entries();
         if let Some(contact_list) = contact_list {
             self.add_event(contact_list);
         } else {
             self.contact_lists
                 .insert(author.to_owned(), CacheEntry::empty());
         }
+        enforce_cap(self.max_entries, "Contact", &mut self.contact_lists);
     }
 
     pub fn add_event(&mut self, event: &Event) {
+        self.prune_expired_entries();
         match event.kind {
             Kind::MuteList => {
                 self.mute_lists.insert(
@@ -165,6 +238,10 @@ impl Cache {
                 );
             }
         }
+
+        enforce_cap(self.max_entries, "Mute", &mut self.mute_lists);
+        enforce_cap(self.max_entries, "Contact", &mut self.contact_lists);
+        enforce_cap(self.max_entries, "Relay", &mut self.relay_lists);
     }
 
     // MARK: - Fetching items from the cache
@@ -173,14 +250,17 @@ impl Cache {
         &mut self,
         pubkey: &PublicKey,
     ) -> Result<Option<TimestampedMuteList>, CacheError> {
+        self.prune_expired_entries();
         get_cache_entry(&mut self.mute_lists, pubkey, self.max_age, "Mute")
     }
 
     pub fn get_relay_list(&mut self, pubkey: &PublicKey) -> Result<Option<RelayList>, CacheError> {
+        self.prune_expired_entries();
         get_cache_entry(&mut self.relay_lists, pubkey, self.max_age, "Relay")
     }
 
     pub fn get_contact_list(&mut self, pubkey: &PublicKey) -> Result<Option<Event>, CacheError> {
+        self.prune_expired_entries();
         get_cache_entry(&mut self.contact_lists, pubkey, self.max_age, "Contact")
     }
 }
@@ -220,11 +300,16 @@ mod tests {
             .unwrap()
     }
 
+    fn create_unique_pubkey() -> PublicKey {
+        // Use random key generation to get distinct, valid pubkeys for eviction tests.
+        Keys::generate().public_key()
+    }
+
     #[tokio::test]
     async fn test_add_and_retrieve_contact_list() {
         let pubkey = create_dummy_pubkey();
         let max_age = Duration::from_secs(60);
-        let mut cache = Cache::new(max_age);
+        let mut cache = Cache::new(max_age, 10);
 
         // Initially, no contact list should be found.
         assert!(matches!(
@@ -247,7 +332,7 @@ mod tests {
     async fn test_add_and_retrieve_mute_list() {
         let pubkey = create_dummy_pubkey();
         let max_age = Duration::from_secs(60);
-        let mut cache = Cache::new(max_age);
+        let mut cache = Cache::new(max_age, 10);
 
         // No mute list initially
         assert!(matches!(
@@ -270,7 +355,7 @@ mod tests {
     async fn test_add_and_retrieve_relay_list() {
         let pubkey = create_dummy_pubkey();
         let max_age = Duration::from_secs(60);
-        let mut cache = Cache::new(max_age);
+        let mut cache = Cache::new(max_age, 10);
 
         // No relay list initially
         assert!(matches!(
@@ -291,7 +376,7 @@ mod tests {
         // Very short max_age to test expiration logic quickly.
         let max_age = Duration::from_millis(100);
         let pubkey = create_dummy_pubkey();
-        let mut cache = Cache::new(max_age);
+        let mut cache = Cache::new(max_age, 10);
 
         // Add a contact list event that will expire soon.
         let event = create_dummy_event(pubkey, Kind::ContactList);
@@ -306,14 +391,39 @@ mod tests {
 
         // Now it should be expired and removed.
         let result = cache.get_contact_list(&pubkey);
-        assert_eq!(result, Err(CacheError::Expired));
+        // Pruning runs on get, so expired entries are removed before lookup.
+        assert_eq!(result, Err(CacheError::NotFound));
+    }
+
+    #[tokio::test]
+    async fn test_prune_removes_expired_entries_without_access() {
+        // Guard against stale cache growth by pruning after the TTL passes.
+        let max_age = Duration::from_millis(50);
+        let pubkey = create_dummy_pubkey();
+        let mut cache = Cache::new(max_age, 10);
+
+        let contact_event = create_dummy_event(pubkey, Kind::ContactList);
+        cache.add_event(&contact_event);
+
+        // Add an empty entry to ensure we also clear cached misses.
+        cache.add_optional_relay_list_with_author(&pubkey, None);
+
+        sleep(Duration::from_millis(75)).await;
+
+        cache.prune_expired_entries();
+
+        assert!(matches!(
+            cache.get_contact_list(&pubkey),
+            Err(CacheError::NotFound)
+        ));
+        assert!(matches!(cache.get_relay_list(&pubkey), Err(CacheError::NotFound)));
     }
 
     #[tokio::test]
     async fn test_empty_entries() {
         let pubkey = create_dummy_pubkey();
         let max_age = Duration::from_secs(60);
-        let mut cache = Cache::new(max_age);
+        let mut cache = Cache::new(max_age, 10);
 
         // Add empty mute list
         cache.add_optional_mute_list_with_author(&pubkey, None);
@@ -339,7 +449,7 @@ mod tests {
     async fn test_re_insertion() {
         let pubkey = create_dummy_pubkey();
         let max_age = Duration::from_secs(60);
-        let mut cache = Cache::new(max_age);
+        let mut cache = Cache::new(max_age, 10);
 
         // Insert empty first
         cache.add_optional_contact_list_with_author(&pubkey, None);
@@ -352,5 +462,32 @@ mod tests {
         // It should now return the actual event
         let retrieved = cache.get_contact_list(&pubkey).unwrap().unwrap();
         assert_eq!(retrieved.id, event.id);
+    }
+
+    #[tokio::test]
+    async fn test_cap_evicts_oldest_entries() {
+        let max_age = Duration::from_secs(60);
+        let max_entries = 2;
+        let mut cache = Cache::new(max_age, max_entries);
+
+        let pubkey_a = create_unique_pubkey();
+        let pubkey_b = create_unique_pubkey();
+        let pubkey_c = create_unique_pubkey();
+
+        cache.add_event(&create_dummy_event(pubkey_a, Kind::ContactList));
+        cache.add_event(&create_dummy_event(pubkey_b, Kind::ContactList));
+
+        // Third insert should evict the oldest (pubkey_a) to honor cap.
+        cache.add_event(&create_dummy_event(pubkey_c, Kind::ContactList));
+
+        assert!(matches!(
+            cache.get_contact_list(&pubkey_a),
+            Err(CacheError::NotFound)
+        ));
+
+        let b_contact = cache.get_contact_list(&pubkey_b).unwrap();
+        let c_contact = cache.get_contact_list(&pubkey_c).unwrap();
+        assert!(b_contact.is_some());
+        assert!(c_contact.is_some());
     }
 }
