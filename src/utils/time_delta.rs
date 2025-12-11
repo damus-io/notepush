@@ -8,6 +8,7 @@ pub struct TimeDelta {
 impl TimeDelta {
     /// Safely calculate the difference between two timestamps in seconds
     /// This function is safer against overflows than subtracting the timestamps directly
+    #[allow(dead_code)] // Used in binary crate; lib-only builds warn because it's unused there.
     pub fn subtracting(t1: Timestamp, t2: Timestamp) -> TimeDelta {
         if t1 > t2 {
             TimeDelta {

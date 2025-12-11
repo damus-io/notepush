@@ -157,6 +157,7 @@ impl NotificationManager {
         apns_environment: a2::client::Endpoint,
         apns_topic: String,
         cache_max_age: std::time::Duration,
+        cache_max_entries: usize,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let connection = db.get()?;
         Self::setup_database(&connection)?;
@@ -180,6 +181,7 @@ impl NotificationManager {
             nostr_network_helper: NostrNetworkHelper::new(
                 relay_url.clone(),
                 cache_max_age,
+                cache_max_entries,
                 event_saver.clone(),
             )
             .await?,
