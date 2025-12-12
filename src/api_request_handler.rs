@@ -1,3 +1,4 @@
+use crate::event_filter::EventFilter;
 use crate::nip98_auth;
 use crate::notification_manager::UserNotificationSettings;
 use crate::relay_connection::RelayConnection;
@@ -19,13 +20,19 @@ use thiserror::Error;
 
 pub struct APIHandler {
     notification_manager: Arc<NotificationManager>,
+    event_filter: Arc<EventFilter>,
     base_url: String,
 }
 
 impl APIHandler {
-    pub fn new(notification_manager: Arc<NotificationManager>, base_url: String) -> Self {
+    pub fn new(
+        notification_manager: Arc<NotificationManager>,
+        event_filter: Arc<EventFilter>,
+        base_url: String,
+    ) -> Self {
         APIHandler {
             notification_manager,
+            event_filter,
             base_url,
         }
     }
@@ -98,9 +105,11 @@ impl APIHandler {
         let (response, websocket) = hyper_tungstenite::upgrade(&mut req, None)?;
         log::info!("New websocket connection.");
 
-        let new_notification_manager = self.notification_manager.clone();
+        let notification_manager = self.notification_manager.clone();
+        let event_filter = self.event_filter.clone();
+
         tokio::spawn(async move {
-            match RelayConnection::run(websocket, new_notification_manager).await {
+            match RelayConnection::run(websocket, notification_manager, event_filter).await {
                 Ok(_) => {}
                 Err(e) => {
                     log::error!("Error with websocket connection: {:?}", e);
@@ -477,6 +486,7 @@ impl Clone for APIHandler {
     fn clone(&self) -> Self {
         APIHandler {
             notification_manager: self.notification_manager.clone(),
+            event_filter: self.event_filter.clone(),
             base_url: self.base_url.clone(),
         }
     }

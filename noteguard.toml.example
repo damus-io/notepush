@@ -1,0 +1,38 @@
+# Example noteguard configuration for notepush
+#
+# Place this file as `noteguard.toml` in the working directory where notepush runs,
+# or set NOTEGUARD_CONFIG_PATH environment variable to point to your config.
+#
+# Without this file, notepush runs in permissive mode (accepts all events).
+
+# The pipeline defines which filters run and in what order.
+# Filters execute sequentially - first rejection stops the pipeline.
+pipeline = ["ratelimit", "blacklist"]
+
+# Rate limiting prevents DoS by limiting events per minute per pubkey.
+# This is the primary defense against spam that triggers expensive remote lookups.
+[filters.ratelimit]
+posts_per_minute = 30
+message = "rate-limited: too many events, please slow down"
+# Optional: whitelist specific pubkeys from rate limiting
+# whitelist = ["trusted-pubkey-hex"]
+
+# Blacklist blocks known bad actors by pubkey or IP range.
+[filters.blacklist]
+pubkeys = []
+# Example: block specific IPs or CIDR ranges
+# ips = ["1.2.3.4"]
+# cidrs = ["10.0.0.0/8"]
+
+# Uncomment to enable content filtering (shadow-rejects matching events)
+# [filters.content]
+# filters = ["spam phrase", "buy now", "limited offer"]
+
+# Uncomment to block specific event kinds
+# [filters.kinds]
+# kinds = [4]  # Block DMs
+# messages = { "4" = "DMs not accepted by this relay" }
+
+# Uncomment to require pubkeys/IPs to be on an allow-list
+# [filters.whitelist]
+# pubkeys = ["allowed-pubkey-hex"]
