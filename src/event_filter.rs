@@ -1,4 +1,4 @@
-//! Event filtering integration with noteguard-core.
+//! Event filtering integration with noteguard.
 //!
 //! This module provides DoS protection by filtering incoming events before
 //! they trigger expensive operations like remote mute list lookups.
@@ -14,7 +14,7 @@
 //! and protect the relay from resource exhaustion.
 
 use nostr::Event;
-use noteguard_core::{Action, Config, InputMessage, Note, Noteguard, OutputMessage};
+use noteguard::{Action, Config, InputMessage, Note, Noteguard, OutputMessage};
 use std::sync::Mutex;
 
 /// Wrapper around Noteguard that provides thread-safe event filtering.
@@ -106,7 +106,7 @@ impl FilterResult {
 
 /// Converts a nostr::Event to the noteguard InputMessage format.
 ///
-/// This bridges the nostr crate's Event type to noteguard-core's Note type.
+/// This bridges the nostr crate's Event type to noteguard's Note type.
 fn event_to_input_message(event: &Event, source_info: &str) -> InputMessage {
     // Convert tags from nostr format to noteguard format.
     // nostr::Tag implements AsRef<[TagStandard]> but we need to serialize

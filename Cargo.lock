@@ -1207,10 +1207,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "noteguard-core"
+name = "noteguard"
 version = "0.1.0"
-source = "git+https://github.com/alltheseas/noteguard?branch=feat%2Fextract-noteguard-core#9dfedecbdfed71ab9f117702cdf9f97b29dd9597"
+source = "git+https://github.com/alltheseas/noteguard?branch=feat%2Fextract-noteguard-core#cca48d17bb0bb5c60e649324ddf83187c2ce74a7"
 dependencies = [
+ "env_logger",
  "ipnetwork",
  "log",
  "serde",
@@ -1235,7 +1236,7 @@ dependencies = [
  "log",
  "nostr",
  "nostr-sdk",
- "noteguard-core",
+ "noteguard",
  "r2d2",
  "r2d2_sqlite",
  "rusqlite",

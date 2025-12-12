@@ -127,7 +127,7 @@ fn load_event_filter() -> EventFilter {
         return EventFilter::permissive();
     }
 
-    let config: noteguard_core::Config = match toml::from_str(&contents) {
+    let config: noteguard::Config = match toml::from_str(&contents) {
         Ok(c) => c,
         Err(e) => {
             log::error!(
