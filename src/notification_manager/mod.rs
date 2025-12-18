@@ -365,20 +365,152 @@ impl NotificationManager {
         );
 
         for pubkey in pubkeys_to_notify {
+            // FIX FOR DUPLICATE NOTIFICATIONS (GitHub issue #24):
+            //
+            // Previously, we used a check-then-act pattern that caused a race condition
+            // when the same event arrived via multiple relay connections concurrently.
+            //
+            // The fix uses a two-phase optimistic insert with lease-based retry:
+            //   1. INSERT OR IGNORE with received_notification=false (atomic "claim")
+            //   2. If insert succeeds (rows_affected > 0), we "own" this notification
+            //   3. If insert fails, check the existing row:
+            //      - received_notification=true → already sent, skip
+            //      - received_notification=false AND sent_at recent (<60s) → in-flight, skip
+            //      - received_notification=false AND sent_at stale (>60s) → crashed/failed, retry
+            //   4. Send the notification
+            //   5. UPDATE received_notification=true only on successful send
+            //
+            // The 60-second lease timeout balances:
+            //   - Avoiding duplicates from concurrent processing (recent = in-flight)
+            //   - Allowing retries after crashes/timeouts (stale = abandoned)
+            // APNS typical latency is ~500ms, so 60s provides ample buffer for edge cases.
+            const LEASE_TIMEOUT_SECS: u64 = 60;
+            let notification_id = format!("{}:{}", event.id, pubkey);
+            let now = nostr::Timestamp::now();
+
+            let rows_affected = {
+                let db_mutex_guard = self.db.lock().await;
+                db_mutex_guard.get()?.execute(
+                    "INSERT OR IGNORE INTO notifications (id, event_id, pubkey, received_notification, sent_at)
+                    VALUES (?, ?, ?, ?, ?)",
+                    params![
+                        &notification_id,
+                        event.id.to_sql_string(),
+                        pubkey.to_sql_string(),
+                        false,
+                        now.to_sql_string(),
+                    ],
+                )?
+            };
+
+            if rows_affected == 0 {
+                // Row exists - check current state and lease
+                let should_skip = {
+                    let db_mutex_guard = self.db.lock().await;
+                    let conn = db_mutex_guard.get()?;
+                    let mut stmt = conn.prepare(
+                        "SELECT received_notification, sent_at FROM notifications WHERE id = ?"
+                    )?;
+                    let result: Result<(bool, String), _> = stmt.query_row(
+                        [&notification_id],
+                        |row| Ok((row.get(0)?, row.get(1)?))
+                    );
+
+                    match result {
+                        Ok((true, _)) => {
+                            // Already successfully sent
+                            log::debug!(
+                                "Notification for event {} to pubkey {} already sent (dedup)",
+                                event.id,
+                                pubkey
+                            );
+                            true
+                        }
+                        Ok((false, sent_at_str)) => {
+                            // In-flight or failed - check lease timeout
+                            let sent_at = nostr::Timestamp::from_sql_string(sent_at_str)
+                                .unwrap_or(now);
+                            let age_secs = now.as_u64().saturating_sub(sent_at.as_u64());
+
+                            if age_secs < LEASE_TIMEOUT_SECS {
+                                // Recent claim - another thread is handling it
+                                log::debug!(
+                                    "Notification for event {} to pubkey {} in-flight (lease active, {}s old)",
+                                    event.id,
+                                    pubkey,
+                                    age_secs
+                                );
+                                true
+                            } else {
+                                // Stale claim - previous attempt likely crashed, retry
+                                // Atomically extend lease before retrying
+                                let updated = conn.execute(
+                                    "UPDATE notifications SET sent_at = ? WHERE id = ? AND received_notification = false AND sent_at = ?",
+                                    params![now.to_sql_string(), &notification_id, sent_at.to_sql_string()],
+                                )?;
+                                if updated == 0 {
+                                    // Another thread beat us to it
+                                    log::debug!(
+                                        "Notification for event {} to pubkey {} lease contention, skipping",
+                                        event.id,
+                                        pubkey
+                                    );
+                                    true
+                                } else {
+                                    log::debug!(
+                                        "Retrying notification for event {} to pubkey {} (stale lease, {}s old)",
+                                        event.id,
+                                        pubkey,
+                                        age_secs
+                                    );
+                                    false
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            // Row disappeared somehow, skip
+                            true
+                        }
+                    }
+                };
+
+                if should_skip {
+                    continue;
+                }
+            }
+
+            // Refresh lease immediately before sending to maximize time window.
+            // This ensures we have a full 60s even if claim/retry logic took time.
+            // Also serves as a final guard: if another thread reclaimed or sent,
+            // rows_affected will be 0 and we skip sending to avoid duplicates.
+            let send_time = nostr::Timestamp::now();
+            let lease_refreshed = {
+                let db_mutex_guard = self.db.lock().await;
+                db_mutex_guard.get()?.execute(
+                    "UPDATE notifications SET sent_at = ? WHERE id = ? AND received_notification = false",
+                    params![send_time.to_sql_string(), &notification_id],
+                )?
+            };
+
+            if lease_refreshed == 0 {
+                // Another thread sent or reclaimed between our check and refresh
+                log::debug!(
+                    "Notification for event {} to pubkey {} lease lost before send, skipping",
+                    event.id,
+                    pubkey
+                );
+                continue;
+            }
+
             self.send_event_notifications_to_pubkey(event, &pubkey)
                 .await?;
+
+            // Mark as successfully sent
             {
                 let db_mutex_guard = self.db.lock().await;
                 db_mutex_guard.get()?.execute(
-                    "INSERT OR REPLACE INTO notifications (id, event_id, pubkey, received_notification, sent_at)
-                    VALUES (?, ?, ?, ?, ?)",
-                    params![
-                        format!("{}:{}", event.id, pubkey),
-                        event.id.to_sql_string(),
-                        pubkey.to_sql_string(),
-                        true,
-                        nostr::Timestamp::now().to_sql_string(),
-                    ],
+                    "UPDATE notifications SET received_notification = true, sent_at = ? WHERE id = ?",
+                    params![now.to_sql_string(), &notification_id],
                 )?;
             }
         }
