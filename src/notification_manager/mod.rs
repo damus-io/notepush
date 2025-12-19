@@ -43,6 +43,8 @@ pub struct NotificationManager {
     apns_client: Mutex<Client>,
     nostr_network_helper: NostrNetworkHelper,
     pub event_saver: EventSaver,
+    /// Server keys for NIP-44 encryption (None if encryption disabled)
+    server_keys: Option<crate::server_keys::ServerKeys>,
 }
 
 #[derive(Clone)]
@@ -157,6 +159,7 @@ impl NotificationManager {
         apns_environment: a2::client::Endpoint,
         apns_topic: String,
         cache_max_age: std::time::Duration,
+        server_keys: Option<crate::server_keys::ServerKeys>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let connection = db.get()?;
         Self::setup_database(&connection)?;
@@ -184,6 +187,7 @@ impl NotificationManager {
             )
             .await?,
             event_saver,
+            server_keys,
         };
 
         Ok(manager)
@@ -282,6 +286,16 @@ impl NotificationManager {
             "user_info",
             "hellthread_notifications_max_pubkeys",
             "TINYINT",
+            None,
+        )?;
+
+        // NIP-44 E2E encryption support
+        // Device pubkey is the client's public key for encrypting notifications
+        Self::add_column_if_not_exists(
+            db,
+            "user_info",
+            "device_pubkey",
+            "TEXT",
             None,
         )?;
 
@@ -514,7 +528,7 @@ impl NotificationManager {
             {
                 continue;
             }
-            self.send_event_notification_to_device_token(event, &device_token)
+            self.send_event_notification_to_device_token(event, pubkey, &device_token)
                 .await?;
         }
         Ok(())
@@ -622,6 +636,7 @@ impl NotificationManager {
     async fn send_event_notification_to_device_token(
         &self,
         event: &Event,
+        pubkey: &PublicKey,
         device_token: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let (title, subtitle, body) = self.format_notification_message(event);
@@ -637,10 +652,42 @@ impl NotificationManager {
             .build(device_token, Default::default());
 
         payload.options.apns_topic = Some(self.apns_topic.as_str());
-        payload.data.insert(
-            "nostr_event",
-            serde_json::Value::String(event.try_as_json()?),
-        );
+
+        // NIP-44 E2E Encryption: encrypt to device pubkey if registered
+        // This ensures Apple only sees ciphertext, not notification content
+        let event_json = event.try_as_json()?;
+        let encrypted = self.maybe_encrypt_payload(pubkey, device_token, &event_json).await;
+
+        match encrypted {
+            Some(ciphertext) => {
+                // Encrypted payload: client decrypts using device privkey
+                payload.data.insert("encrypted", serde_json::Value::Bool(true));
+                payload.data.insert(
+                    "ciphertext",
+                    serde_json::Value::String(ciphertext),
+                );
+                // Metrics: Track encrypted notification count
+                log::info!(
+                    "nip44_notification encrypted=true device={} pubkey={}",
+                    device_token,
+                    pubkey.to_hex()
+                );
+            }
+            None => {
+                // Plaintext payload: legacy mode for devices without encryption
+                payload.data.insert("encrypted", serde_json::Value::Bool(false));
+                payload.data.insert(
+                    "nostr_event",
+                    serde_json::Value::String(event_json),
+                );
+                // Metrics: Track plaintext notification count
+                log::debug!(
+                    "nip44_notification encrypted=false device={} pubkey={}",
+                    device_token,
+                    pubkey.to_hex()
+                );
+            }
+        }
 
         let apns_client_mutex_guard = self.apns_client.lock().await;
 
@@ -656,6 +703,59 @@ impl NotificationManager {
         log::info!("Notification sent to device token: {}", device_token);
 
         Ok(())
+    }
+
+    /// Encrypt notification payload if device has registered a pubkey
+    ///
+    /// Returns Some(ciphertext) if encryption is enabled and device has a pubkey,
+    /// None otherwise (fallback to plaintext).
+    async fn maybe_encrypt_payload(
+        &self,
+        pubkey: &PublicKey,
+        device_token: &str,
+        event_json: &str,
+    ) -> Option<String> {
+        // Early return if server doesn't have encryption keys
+        let server_keys = self.server_keys.as_ref()?;
+
+        // Check if device has registered an encryption pubkey
+        let device_pubkey = match self.get_device_pubkey(pubkey, device_token).await {
+            Ok(Some(pk)) => pk,
+            Ok(None) => {
+                // Device hasn't registered for encryption - this is normal, not an error
+                return None;
+            }
+            Err(e) => {
+                // Metrics: Track database lookup errors
+                log::warn!(
+                    "nip44_db_error error=\"{}\" device={} pubkey={}",
+                    e,
+                    device_token,
+                    pubkey.to_hex()
+                );
+                return None;
+            }
+        };
+
+        // Encrypt the event JSON using NIP-44 (rust-nostr implementation)
+        match nostr::nips::nip44::encrypt(
+            server_keys.secret_key(),
+            &device_pubkey,
+            event_json,
+            nostr::nips::nip44::Version::V2,
+        ) {
+            Ok(ciphertext) => Some(ciphertext),
+            Err(e) => {
+                // Metrics: Track encryption errors
+                log::error!(
+                    "nip44_encryption_error error=\"{}\" device={} pubkey={}",
+                    e,
+                    device_token,
+                    pubkey.to_hex()
+                );
+                None
+            }
+        }
     }
 
     fn format_notification_message(&self, event: &Event) -> (String, String, String) {
@@ -733,6 +833,73 @@ impl NotificationManager {
             params![pubkey.to_sql_string(), device_token],
         )?;
         Ok(())
+    }
+
+    /// Save a device pubkey for NIP-44 encrypted notifications
+    ///
+    /// When a device pubkey is registered, all notifications to this user/device
+    /// will be encrypted using NIP-44 before being sent via APNs. The client
+    /// decrypts using the corresponding private key.
+    pub async fn save_device_pubkey(
+        &self,
+        pubkey: &nostr::PublicKey,
+        device_token: &str,
+        device_pubkey: &nostr::PublicKey,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let db_mutex_guard = self.db.lock().await;
+        let rows_updated = db_mutex_guard.get()?.execute(
+            "UPDATE user_info SET device_pubkey = ? WHERE pubkey = ? AND device_token = ?",
+            params![
+                device_pubkey.to_hex(),
+                pubkey.to_sql_string(),
+                device_token
+            ],
+        )?;
+
+        // If no rows were updated, the user/device pair doesn't exist yet
+        if rows_updated == 0 {
+            return Err("User/device registration not found. Register device first.".into());
+        }
+
+        log::info!(
+            "Registered device pubkey for user {} device {}: {}",
+            pubkey.to_hex(),
+            device_token,
+            device_pubkey.to_hex()
+        );
+
+        Ok(())
+    }
+
+    /// Get the device pubkey for a user/device pair, if one is registered
+    ///
+    /// Returns None if the user hasn't registered a device pubkey for encryption,
+    /// in which case notifications should be sent in plaintext (legacy mode).
+    pub async fn get_device_pubkey(
+        &self,
+        pubkey: &nostr::PublicKey,
+        device_token: &str,
+    ) -> Result<Option<nostr::PublicKey>, Box<dyn std::error::Error>> {
+        let db_mutex_guard = self.db.lock().await;
+        let connection = db_mutex_guard.get()?;
+        let mut stmt = connection.prepare(
+            "SELECT device_pubkey FROM user_info WHERE pubkey = ? AND device_token = ?",
+        )?;
+
+        let result: Option<Option<String>> = stmt
+            .query_row([pubkey.to_sql_string(), device_token.to_string()], |row| {
+                row.get(0)
+            })
+            .ok();
+
+        // Flatten Option<Option<String>> and parse the hex pubkey
+        match result.flatten() {
+            Some(hex) => {
+                let pk = nostr::PublicKey::from_hex(&hex)?;
+                Ok(Some(pk))
+            }
+            None => Ok(None),
+        }
     }
 
     pub async fn get_user_notification_settings(

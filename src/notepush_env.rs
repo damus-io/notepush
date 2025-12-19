@@ -1,3 +1,4 @@
+use notepush::server_keys::ServerKeys;
 use dotenv::dotenv;
 use std::env;
 
@@ -6,6 +7,10 @@ const DEFAULT_HOST: &str = "0.0.0.0";
 const DEFAULT_PORT: &str = "8000";
 const DEFAULT_RELAY_URL: &str = "wss://relay.damus.io";
 const DEFAULT_NOSTR_EVENT_CACHE_MAX_AGE: u64 = 60 * 60; // 1 hour
+
+// NIP-44 E2E encryption defaults
+// When enabled, notification payloads are encrypted to client device pubkeys
+const DEFAULT_NIP44_ENABLED: bool = false;
 
 pub struct NotePushEnv {
     // The path to the Apple private key .p8 file
@@ -28,6 +33,11 @@ pub struct NotePushEnv {
     pub relay_url: String,
     // The max age of the Nostr event cache, in seconds
     pub nostr_event_cache_max_age: std::time::Duration,
+    // NIP-44 E2E encryption configuration
+    // When enabled, notifications are encrypted to client device pubkeys
+    pub nip44_enabled: bool,
+    // Server keypair for NIP-44 encryption (required when nip44_enabled is true)
+    pub server_keys: Option<ServerKeys>,
 }
 
 impl NotePushEnv {
@@ -57,6 +67,34 @@ impl NotePushEnv {
                 DEFAULT_NOSTR_EVENT_CACHE_MAX_AGE,
             ));
 
+        // NIP-44 E2E encryption configuration
+        // When enabled, notification payloads are encrypted to client device pubkeys
+        // before being sent via APNs, so Apple only sees ciphertext.
+        let nip44_enabled = env::var("NIP44_ENABLED")
+            .map(|v| v.to_lowercase() == "true" || v == "1")
+            .unwrap_or(DEFAULT_NIP44_ENABLED);
+
+        // Server keypair: required when NIP-44 is enabled
+        // In production, SERVER_PRIVKEY must be set to a persistent key.
+        // Without it, we generate an ephemeral key (only useful for development).
+        let server_keys = if nip44_enabled {
+            match ServerKeys::from_env_or_generate(true) {
+                Ok(keys) => {
+                    log::info!(
+                        "NIP-44 encryption enabled. Server pubkey: {}",
+                        keys.public_key_hex()
+                    );
+                    Some(keys)
+                }
+                Err(e) => {
+                    log::error!("Failed to load server keys for NIP-44: {}", e);
+                    return Err(env::VarError::NotPresent);
+                }
+            }
+        } else {
+            None
+        };
+
         Ok(NotePushEnv {
             apns_private_key_path,
             apns_private_key_id,
@@ -69,6 +107,8 @@ impl NotePushEnv {
             api_base_url,
             relay_url,
             nostr_event_cache_max_age,
+            nip44_enabled,
+            server_keys,
         })
     }
 
