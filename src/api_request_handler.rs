@@ -1,6 +1,6 @@
 use crate::nip98_auth;
 use crate::relay_connection::RelayConnection;
-use notepush::notification_manager::UserNotificationSettings;
+use notepush::notification_manager::{NotificationManagerError, UserNotificationSettings};
 use notepush::server_keys::ServerKeys;
 use http_body_util::Full;
 use hyper::body::Buf;
@@ -623,7 +623,7 @@ impl APIHandler {
         };
 
         // Store the device pubkey for this user/device pair
-        // Returns error if user/device not registered yet (must call PUT /user-info first)
+        // Returns typed error if user/device not registered yet
         match self
             .notification_manager
             .save_device_pubkey(&pubkey, device_token, &device_pubkey)
@@ -637,9 +637,10 @@ impl APIHandler {
                 }),
             }),
             Err(e) => {
-                // Check if this is a "not found" error (user/device not registered)
-                let error_msg = e.to_string();
-                if error_msg.contains("not found") || error_msg.contains("Register device first") {
+                // Match on typed error for robust error handling
+                if e.downcast_ref::<NotificationManagerError>()
+                    == Some(&NotificationManagerError::DeviceNotRegistered)
+                {
                     Ok(APIResponse {
                         status: StatusCode::NOT_FOUND,
                         body: json!({

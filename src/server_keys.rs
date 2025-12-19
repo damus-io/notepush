@@ -54,10 +54,22 @@ impl ServerKeys {
     /// If absent and `allow_generate` is true, generates a new keypair (dev mode).
     /// If absent and `allow_generate` is false, returns an error (production mode).
     pub fn from_env_or_generate(allow_generate: bool) -> Result<Self, ServerKeysError> {
-        match std::env::var("SERVER_PRIVKEY") {
-            Ok(hex) => Self::from_secret_hex(&hex),
-            Err(_) if allow_generate => Ok(Self::generate()),
-            Err(_) => Err(ServerKeysError::MissingEnvVar),
+        let env_value = std::env::var("SERVER_PRIVKEY").ok();
+        Self::from_env_value(env_value.as_deref(), allow_generate)
+    }
+
+    /// Internal helper for testable env gating logic
+    ///
+    /// Takes the env value directly (None if unset) to enable unit testing
+    /// without actually modifying environment variables.
+    fn from_env_value(
+        server_privkey: Option<&str>,
+        allow_generate: bool,
+    ) -> Result<Self, ServerKeysError> {
+        match server_privkey {
+            Some(hex) => Self::from_secret_hex(hex),
+            None if allow_generate => Ok(Self::generate()),
+            None => Err(ServerKeysError::MissingEnvVar),
         }
     }
 
@@ -237,5 +249,58 @@ mod tests {
 
         // First byte should be version 2
         assert_eq!(decoded[0], 2, "NIP-44 version byte should be 2");
+    }
+
+    // Tests for env gating logic (NIP44_ENABLED + SERVER_PRIVKEY + NIP44_ALLOW_EPHEMERAL)
+
+    #[test]
+    fn test_from_env_value_with_valid_key() {
+        // When SERVER_PRIVKEY is set to valid hex, should load successfully
+        let valid_key = "0000000000000000000000000000000000000000000000000000000000000001";
+        let result = ServerKeys::from_env_value(Some(valid_key), false);
+        assert!(result.is_ok());
+
+        let keys = result.unwrap();
+        assert_eq!(keys.secret_key().to_secret_bytes()[31], 1);
+    }
+
+    #[test]
+    fn test_from_env_value_with_invalid_key() {
+        // When SERVER_PRIVKEY is set but invalid, should return error
+        let result = ServerKeys::from_env_value(Some("invalid-hex"), false);
+        assert!(matches!(result, Err(ServerKeysError::InvalidSecretKey)));
+    }
+
+    #[test]
+    fn test_from_env_value_missing_without_allow_generate() {
+        // Production mode: SERVER_PRIVKEY missing + allow_generate=false → error
+        // This is the critical security check: NIP44_ENABLED=true requires SERVER_PRIVKEY
+        let result = ServerKeys::from_env_value(None, false);
+        assert!(matches!(result, Err(ServerKeysError::MissingEnvVar)));
+    }
+
+    #[test]
+    fn test_from_env_value_missing_with_allow_generate() {
+        // Dev mode: SERVER_PRIVKEY missing + allow_generate=true → generates ephemeral
+        // This is only used when NIP44_ALLOW_EPHEMERAL=true
+        let result = ServerKeys::from_env_value(None, true);
+        assert!(result.is_ok());
+
+        // Verify generated keys are valid
+        let keys = result.unwrap();
+        let _ = keys.secret_key();
+        let _ = keys.public_key();
+    }
+
+    #[test]
+    fn test_from_env_value_prefers_env_over_generate() {
+        // When SERVER_PRIVKEY is set, should use it even if allow_generate=true
+        let valid_key = "0000000000000000000000000000000000000000000000000000000000000001";
+        let result = ServerKeys::from_env_value(Some(valid_key), true);
+        assert!(result.is_ok());
+
+        // Verify it loaded from env (key byte 31 == 1), not generated (random)
+        let keys = result.unwrap();
+        assert_eq!(keys.secret_key().to_secret_bytes()[31], 1);
     }
 }

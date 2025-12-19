@@ -28,6 +28,28 @@ use r2d2_sqlite::SqliteConnectionManager;
 use std::fs::File;
 use utils::should_mute_notification_for_mutelist;
 
+// MARK: - Error types
+
+/// Errors specific to NotificationManager operations
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NotificationManagerError {
+    /// The user/device pair is not registered (must call PUT /user-info first)
+    DeviceNotRegistered,
+}
+
+impl std::fmt::Display for NotificationManagerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DeviceNotRegistered => write!(
+                f,
+                "User/device registration not found. Register device first."
+            ),
+        }
+    }
+}
+
+impl std::error::Error for NotificationManagerError {}
+
 // MARK: - NotificationManager
 
 // Default threshold of the hellthread pubkey tag count setting if it is not set.
@@ -863,7 +885,7 @@ impl NotificationManager {
 
         // If no rows were updated, the user/device pair doesn't exist yet
         if rows_updated == 0 {
-            return Err("User/device registration not found. Register device first.".into());
+            return Err(NotificationManagerError::DeviceNotRegistered.into());
         }
 
         // Debug level: avoid logging full pubkeys/device tokens in production
