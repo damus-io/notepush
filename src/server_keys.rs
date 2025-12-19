@@ -153,4 +153,89 @@ mod tests {
         let hex = keys.public_key_hex();
         assert_eq!(hex.len(), 64);
     }
+
+    #[test]
+    fn test_nip44_encrypt_decrypt_roundtrip() {
+        // Server encrypts notification to client device pubkey
+        let server_keys = ServerKeys::generate();
+        let client_keys = Keys::generate();
+
+        let plaintext = r#"{"id":"abc","content":"Hello world"}"#;
+
+        // Server encrypts to client's public key
+        let ciphertext = nostr::nips::nip44::encrypt(
+            server_keys.secret_key(),
+            &client_keys.public_key(),
+            plaintext,
+            nostr::nips::nip44::Version::V2,
+        )
+        .expect("encryption should succeed");
+
+        // Ciphertext should be base64-encoded and different from plaintext
+        assert!(!ciphertext.is_empty());
+        assert_ne!(ciphertext, plaintext);
+
+        // Client decrypts using server's public key
+        let decrypted = nostr::nips::nip44::decrypt(
+            client_keys.secret_key().expect("test key has secret"),
+            &server_keys.public_key(),
+            &ciphertext,
+        )
+        .expect("decryption should succeed");
+
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn test_nip44_wrong_key_fails_decryption() {
+        // Verify that wrong keys cannot decrypt
+        let server_keys = ServerKeys::generate();
+        let client_keys = Keys::generate();
+        let wrong_keys = Keys::generate();
+
+        let plaintext = "secret message";
+
+        let ciphertext = nostr::nips::nip44::encrypt(
+            server_keys.secret_key(),
+            &client_keys.public_key(),
+            plaintext,
+            nostr::nips::nip44::Version::V2,
+        )
+        .expect("encryption should succeed");
+
+        // Attempting to decrypt with wrong sender pubkey should fail
+        let result = nostr::nips::nip44::decrypt(
+            client_keys.secret_key().expect("test key has secret"),
+            &wrong_keys.public_key(), // Wrong server pubkey
+            &ciphertext,
+        );
+
+        // Decryption with wrong key should fail
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_nip44_payload_format() {
+        // Verify the ciphertext format is valid NIP-44 (base64 with version byte)
+        let server_keys = ServerKeys::generate();
+        let client_keys = Keys::generate();
+
+        let ciphertext = nostr::nips::nip44::encrypt(
+            server_keys.secret_key(),
+            &client_keys.public_key(),
+            "test",
+            nostr::nips::nip44::Version::V2,
+        )
+        .expect("encryption should succeed");
+
+        // NIP-44 ciphertext should be base64-encoded
+        // It should decode successfully
+        use base64::Engine;
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(&ciphertext)
+            .expect("ciphertext should be valid base64");
+
+        // First byte should be version 2
+        assert_eq!(decoded[0], 2, "NIP-44 version byte should be 2");
+    }
 }

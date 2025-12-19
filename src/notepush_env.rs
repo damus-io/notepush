@@ -74,11 +74,17 @@ impl NotePushEnv {
             .map(|v| v.to_lowercase() == "true" || v == "1")
             .unwrap_or(DEFAULT_NIP44_ENABLED);
 
+        // NIP44_ALLOW_EPHEMERAL: explicitly opt-in to ephemeral keys (dev/testing only)
+        // In production, always require SERVER_PRIVKEY for stable server identity.
+        let allow_ephemeral = env::var("NIP44_ALLOW_EPHEMERAL")
+            .map(|v| v.to_lowercase() == "true" || v == "1")
+            .unwrap_or(false);
+
         // Server keypair: required when NIP-44 is enabled
-        // In production, SERVER_PRIVKEY must be set to a persistent key.
-        // Without it, we generate an ephemeral key (only useful for development).
+        // Production: SERVER_PRIVKEY must be set (startup fails without it)
+        // Development: Set NIP44_ALLOW_EPHEMERAL=true to allow ephemeral keys
         let server_keys = if nip44_enabled {
-            match ServerKeys::from_env_or_generate(true) {
+            match ServerKeys::from_env_or_generate(allow_ephemeral) {
                 Ok(keys) => {
                     log::info!(
                         "NIP-44 encryption enabled. Server pubkey: {}",
@@ -88,6 +94,9 @@ impl NotePushEnv {
                 }
                 Err(e) => {
                     log::error!("Failed to load server keys for NIP-44: {}", e);
+                    log::error!(
+                        "Set SERVER_PRIVKEY env var, or NIP44_ALLOW_EPHEMERAL=true for development"
+                    );
                     return Err(env::VarError::NotPresent);
                 }
             }

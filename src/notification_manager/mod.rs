@@ -667,10 +667,10 @@ impl NotificationManager {
                     serde_json::Value::String(ciphertext),
                 );
                 // Metrics: Track encrypted notification count
-                log::info!(
-                    "nip44_notification encrypted=true device={} pubkey={}",
-                    device_token,
-                    pubkey.to_hex()
+                // Use debug level to avoid logging sensitive device tokens in production
+                log::debug!(
+                    "nip44_notification encrypted=true pubkey={}...",
+                    &pubkey.to_hex()[..8]
                 );
             }
             None => {
@@ -700,7 +700,8 @@ impl NotificationManager {
             ),
         }
 
-        log::info!("Notification sent to device token: {}", device_token);
+        // Debug level: device tokens are sensitive and shouldn't appear in production logs
+        log::debug!("Notification sent to device");
 
         Ok(())
     }
@@ -810,8 +811,12 @@ impl NotificationManager {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let current_time_unix = Timestamp::now();
         let db_mutex_guard = self.db.lock().await;
+        // Use UPSERT to preserve existing columns on re-registration.
+        // INSERT OR REPLACE would drop device_pubkey, notification settings, etc.
+        // ON CONFLICT only updates added_at; all other columns remain unchanged.
         db_mutex_guard.get()?.execute(
-            "INSERT OR REPLACE INTO user_info (id, pubkey, device_token, added_at) VALUES (?, ?, ?, ?)",
+            "INSERT INTO user_info (id, pubkey, device_token, added_at) VALUES (?, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET added_at = excluded.added_at",
             params![
                 format!("{}:{}", pubkey.to_sql_string(), device_token),
                 pubkey.to_sql_string(),
@@ -861,11 +866,10 @@ impl NotificationManager {
             return Err("User/device registration not found. Register device first.".into());
         }
 
-        log::info!(
-            "Registered device pubkey for user {} device {}: {}",
-            pubkey.to_hex(),
-            device_token,
-            device_pubkey.to_hex()
+        // Debug level: avoid logging full pubkeys/device tokens in production
+        log::debug!(
+            "Registered device pubkey for user {}...",
+            &pubkey.to_hex()[..8]
         );
 
         Ok(())

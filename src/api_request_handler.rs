@@ -126,18 +126,20 @@ impl APIHandler {
         // Check for public (unauthenticated) routes first
         // These endpoints are accessible without NIP-98 auth
         if let Some(response) = self.handle_public_routes(&req).await {
-            log::info!("[{}] {} (public): {}", req.method(), req.uri(), response.status);
+            // Safe to log path for public routes (no device tokens)
+            log::info!("[{}] {} (public): {}", req.method(), req.uri().path(), response.status);
             return Ok(response);
         }
 
         // All other routes require authentication
         let parsed_request = self.parse_http_request(&mut req).await?;
         let api_response: APIResponse = self.handle_parsed_http_request(&parsed_request).await?;
+        // Log abbreviated pubkey; full URIs contain device tokens which are sensitive
+        let pubkey_abbrev = &parsed_request.authorized_pubkey.to_hex()[..8];
         log::info!(
-            "[{}] {} (Authorized pubkey: {}): {}",
+            "[{}] /user-info/... (pubkey: {}...): {}",
             req.method(),
-            req.uri(),
-            parsed_request.authorized_pubkey,
+            pubkey_abbrev,
             api_response.status
         );
         Ok(api_response)
@@ -621,17 +623,36 @@ impl APIHandler {
         };
 
         // Store the device pubkey for this user/device pair
-        self.notification_manager
+        // Returns error if user/device not registered yet (must call PUT /user-info first)
+        match self
+            .notification_manager
             .save_device_pubkey(&pubkey, device_token, &device_pubkey)
-            .await?;
-
-        Ok(APIResponse {
-            status: StatusCode::OK,
-            body: json!({
-                "message": "Device encryption key registered successfully",
-                "device_pubkey": device_pubkey.to_hex()
+            .await
+        {
+            Ok(()) => Ok(APIResponse {
+                status: StatusCode::OK,
+                body: json!({
+                    "message": "Device encryption key registered successfully",
+                    "device_pubkey": device_pubkey.to_hex()
+                }),
             }),
-        })
+            Err(e) => {
+                // Check if this is a "not found" error (user/device not registered)
+                let error_msg = e.to_string();
+                if error_msg.contains("not found") || error_msg.contains("Register device first") {
+                    Ok(APIResponse {
+                        status: StatusCode::NOT_FOUND,
+                        body: json!({
+                            "error": "Device not registered",
+                            "message": "Register the device first with PUT /user-info/:pubkey/:deviceToken"
+                        }),
+                    })
+                } else {
+                    // Re-propagate other errors for generic 500 handling
+                    Err(e)
+                }
+            }
+        }
     }
 }
 
