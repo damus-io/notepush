@@ -1,6 +1,8 @@
 use crate::nip98_auth;
-use crate::notification_manager::UserNotificationSettings;
 use crate::relay_connection::RelayConnection;
+use notepush::notification_manager::{NotificationManagerError, UserNotificationSettings};
+use notepush::server_keys::ServerKeys;
+use notepush::Platform;
 use http_body_util::Full;
 use hyper::body::Buf;
 use hyper::body::Bytes;
@@ -10,7 +12,7 @@ use hyper::{Request, Response, StatusCode};
 use http_body_util::BodyExt;
 use serde_json::from_value;
 
-use crate::notification_manager::NotificationManager;
+use notepush::notification_manager::NotificationManager;
 use hyper::Method;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -20,13 +22,20 @@ use thiserror::Error;
 pub struct APIHandler {
     notification_manager: Arc<NotificationManager>,
     base_url: String,
+    /// Server keys for NIP-44 encryption (None if encryption disabled)
+    server_keys: Option<ServerKeys>,
 }
 
 impl APIHandler {
-    pub fn new(notification_manager: Arc<NotificationManager>, base_url: String) -> Self {
+    pub fn new(
+        notification_manager: Arc<NotificationManager>,
+        base_url: String,
+        server_keys: Option<ServerKeys>,
+    ) -> Self {
         APIHandler {
             notification_manager,
             base_url,
+            server_keys,
         }
     }
 
@@ -115,16 +124,64 @@ impl APIHandler {
         &self,
         mut req: Request<Incoming>,
     ) -> Result<APIResponse, Box<dyn std::error::Error>> {
+        // Check for public (unauthenticated) routes first
+        // These endpoints are accessible without NIP-98 auth
+        if let Some(response) = self.handle_public_routes(&req).await {
+            // Safe to log path for public routes (no device tokens)
+            log::info!("[{}] {} (public): {}", req.method(), req.uri().path(), response.status);
+            return Ok(response);
+        }
+
+        // All other routes require authentication
         let parsed_request = self.parse_http_request(&mut req).await?;
         let api_response: APIResponse = self.handle_parsed_http_request(&parsed_request).await?;
+        // Log abbreviated pubkey; full URIs contain device tokens which are sensitive
+        let pubkey_abbrev = &parsed_request.authorized_pubkey.to_hex()[..8];
         log::info!(
-            "[{}] {} (Authorized pubkey: {}): {}",
+            "[{}] /user-info/... (pubkey: {}...): {}",
             req.method(),
-            req.uri(),
-            parsed_request.authorized_pubkey,
+            pubkey_abbrev,
             api_response.status
         );
         Ok(api_response)
+    }
+
+    /// Handle public endpoints that don't require authentication
+    ///
+    /// Returns Some(response) if the route matches a public endpoint,
+    /// None if the route should require authentication.
+    async fn handle_public_routes(&self, req: &Request<Incoming>) -> Option<APIResponse> {
+        // GET /server-pubkey - Returns the server's public key for NIP-44 encryption
+        // Clients need this to know which key to expect encrypted payloads from
+        if req.method() == Method::GET && req.uri().path() == "/server-pubkey" {
+            return Some(self.handle_server_pubkey());
+        }
+
+        None
+    }
+
+    /// Returns the server's public key for NIP-44 encryption
+    ///
+    /// Clients call this endpoint to discover the server's pubkey before
+    /// registering their device pubkey. When they receive an encrypted
+    /// notification, they'll use this pubkey as the "sender" when decrypting.
+    fn handle_server_pubkey(&self) -> APIResponse {
+        match &self.server_keys {
+            Some(keys) => APIResponse {
+                status: StatusCode::OK,
+                body: json!({
+                    "pubkey": keys.public_key_hex(),
+                    "encryption_enabled": true
+                }),
+            },
+            None => APIResponse {
+                status: StatusCode::OK,
+                body: json!({
+                    "pubkey": null,
+                    "encryption_enabled": false
+                }),
+            },
+        }
     }
 
     async fn parse_http_request(
@@ -195,6 +252,17 @@ impl APIHandler {
             parsed_request,
         ) {
             return self.set_user_settings(parsed_request, &url_params).await;
+        }
+
+        // NIP-44 E2E encryption: Register device pubkey for encrypted notifications
+        if let Some(url_params) = route_match(
+            &Method::PUT,
+            "/user-info/:pubkey/:deviceToken/encryption-key",
+            parsed_request,
+        ) {
+            return self
+                .handle_set_encryption_key(parsed_request, &url_params)
+                .await;
         }
 
         Ok(APIResponse {
@@ -272,13 +340,23 @@ impl APIHandler {
             });
         }
 
+        // Parse platform from request body (optional, defaults to "ios")
+        // Android clients should send { "platform": "android" }
+        let platform = match req.body_json().ok().and_then(|b| b.get("platform").and_then(|p| p.as_str()).map(String::from)) {
+            Some(p) => Platform::from_str(&p),
+            None => Platform::Ios, // Default to iOS for backwards compatibility
+        };
+
         // Proceed with the main logic after passing all checks
         self.notification_manager
-            .save_user_device_info_if_not_present(pubkey, device_token)
+            .save_user_device_info_if_not_present(pubkey, device_token, platform)
             .await?;
         Ok(APIResponse {
             status: StatusCode::OK,
-            body: json!({ "message": "User info saved successfully" }),
+            body: json!({
+                "message": "User info saved successfully",
+                "platform": platform.as_str()
+            }),
         })
     }
 
@@ -469,6 +547,125 @@ impl APIHandler {
             body: json!(settings),
         })
     }
+
+    /// Register a device pubkey for NIP-44 encrypted notifications
+    ///
+    /// When a client registers their device pubkey, the server will encrypt
+    /// all future notification payloads to that pubkey. The client decrypts
+    /// locally using the corresponding private key.
+    ///
+    /// Request body: { "device_pubkey": "<64-char hex pubkey>" }
+    async fn handle_set_encryption_key(
+        &self,
+        req: &ParsedRequest,
+        url_params: &HashMap<&str, String>,
+    ) -> Result<APIResponse, Box<dyn std::error::Error>> {
+        // Early return if NIP-44 encryption is not enabled on this server
+        if self.server_keys.is_none() {
+            return Ok(APIResponse {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                body: json!({ "error": "NIP-44 encryption is not enabled on this server" }),
+            });
+        }
+
+        // Early return if `deviceToken` is missing
+        let device_token = match url_params.get("deviceToken") {
+            Some(token) => token,
+            None => {
+                return Ok(APIResponse {
+                    status: StatusCode::BAD_REQUEST,
+                    body: json!({ "error": "deviceToken is required on the URL" }),
+                })
+            }
+        };
+
+        // Early return if `pubkey` is missing
+        let pubkey = match url_params.get("pubkey") {
+            Some(key) => key,
+            None => {
+                return Ok(APIResponse {
+                    status: StatusCode::BAD_REQUEST,
+                    body: json!({ "error": "pubkey is required on the URL" }),
+                })
+            }
+        };
+
+        // Validate the `pubkey` and prepare it for use
+        let pubkey = match nostr::PublicKey::from_hex(pubkey) {
+            Ok(key) => key,
+            Err(_) => {
+                return Ok(APIResponse {
+                    status: StatusCode::BAD_REQUEST,
+                    body: json!({ "error": "Invalid pubkey" }),
+                })
+            }
+        };
+
+        // Early return if `pubkey` does not match `req.authorized_pubkey`
+        // Only the owner of this device registration can set its encryption key
+        if pubkey != req.authorized_pubkey {
+            return Ok(APIResponse {
+                status: StatusCode::FORBIDDEN,
+                body: json!({ "error": "Forbidden" }),
+            });
+        }
+
+        // Parse and validate the device pubkey from request body
+        let body = req.body_json()?;
+        let device_pubkey_hex = match body.get("device_pubkey").and_then(|v| v.as_str()) {
+            Some(hex) => hex,
+            None => {
+                return Ok(APIResponse {
+                    status: StatusCode::BAD_REQUEST,
+                    body: json!({ "error": "device_pubkey is required in request body" }),
+                })
+            }
+        };
+
+        // Validate device_pubkey is a valid nostr public key
+        let device_pubkey = match nostr::PublicKey::from_hex(device_pubkey_hex) {
+            Ok(key) => key,
+            Err(_) => {
+                return Ok(APIResponse {
+                    status: StatusCode::BAD_REQUEST,
+                    body: json!({ "error": "Invalid device_pubkey: must be 64-char hex" }),
+                })
+            }
+        };
+
+        // Store the device pubkey for this user/device pair
+        // Returns typed error if user/device not registered yet
+        match self
+            .notification_manager
+            .save_device_pubkey(&pubkey, device_token, &device_pubkey)
+            .await
+        {
+            Ok(()) => Ok(APIResponse {
+                status: StatusCode::OK,
+                body: json!({
+                    "message": "Device encryption key registered successfully",
+                    "device_pubkey": device_pubkey.to_hex()
+                }),
+            }),
+            Err(e) => {
+                // Match on typed error for robust error handling
+                if e.downcast_ref::<NotificationManagerError>()
+                    == Some(&NotificationManagerError::DeviceNotRegistered)
+                {
+                    Ok(APIResponse {
+                        status: StatusCode::NOT_FOUND,
+                        body: json!({
+                            "error": "Device not registered",
+                            "message": "Register the device first with PUT /user-info/:pubkey/:deviceToken"
+                        }),
+                    })
+                } else {
+                    // Re-propagate other errors for generic 500 handling
+                    Err(e)
+                }
+            }
+        }
+    }
 }
 
 // MARK: - Extensions
@@ -478,6 +675,7 @@ impl Clone for APIHandler {
         APIHandler {
             notification_manager: self.notification_manager.clone(),
             base_url: self.base_url.clone(),
+            server_keys: self.server_keys.clone(),
         }
     }
 }

@@ -1,3 +1,4 @@
+use notepush::server_keys::ServerKeys;
 use dotenv::dotenv;
 use std::env;
 
@@ -6,6 +7,13 @@ const DEFAULT_HOST: &str = "0.0.0.0";
 const DEFAULT_PORT: &str = "8000";
 const DEFAULT_RELAY_URL: &str = "wss://relay.damus.io";
 const DEFAULT_NOSTR_EVENT_CACHE_MAX_AGE: u64 = 60 * 60; // 1 hour
+
+// NIP-44 E2E encryption defaults
+// When enabled, notification payloads are encrypted to client device pubkeys
+const DEFAULT_NIP44_ENABLED: bool = false;
+
+// ntfy server URL for Android push notifications
+const DEFAULT_NTFY_SERVER_URL: &str = "https://ntfy.damus.io";
 
 pub struct NotePushEnv {
     // The path to the Apple private key .p8 file
@@ -28,6 +36,13 @@ pub struct NotePushEnv {
     pub relay_url: String,
     // The max age of the Nostr event cache, in seconds
     pub nostr_event_cache_max_age: std::time::Duration,
+    // NIP-44 E2E encryption configuration
+    // When enabled, notifications are encrypted to client device pubkeys
+    pub nip44_enabled: bool,
+    // Server keypair for NIP-44 encryption (required when nip44_enabled is true)
+    pub server_keys: Option<ServerKeys>,
+    // ntfy server URL for Android push notifications
+    pub ntfy_server_url: String,
 }
 
 impl NotePushEnv {
@@ -57,6 +72,47 @@ impl NotePushEnv {
                 DEFAULT_NOSTR_EVENT_CACHE_MAX_AGE,
             ));
 
+        // NIP-44 E2E encryption configuration
+        // When enabled, notification payloads are encrypted to client device pubkeys
+        // before being sent via APNs, so Apple only sees ciphertext.
+        let nip44_enabled = env::var("NIP44_ENABLED")
+            .map(|v| v.to_lowercase() == "true" || v == "1")
+            .unwrap_or(DEFAULT_NIP44_ENABLED);
+
+        // NIP44_ALLOW_EPHEMERAL: explicitly opt-in to ephemeral keys (dev/testing only)
+        // In production, always require SERVER_PRIVKEY for stable server identity.
+        let allow_ephemeral = env::var("NIP44_ALLOW_EPHEMERAL")
+            .map(|v| v.to_lowercase() == "true" || v == "1")
+            .unwrap_or(false);
+
+        // Server keypair: required when NIP-44 is enabled
+        // Production: SERVER_PRIVKEY must be set (startup fails without it)
+        // Development: Set NIP44_ALLOW_EPHEMERAL=true to allow ephemeral keys
+        let server_keys = if nip44_enabled {
+            match ServerKeys::from_env_or_generate(allow_ephemeral) {
+                Ok(keys) => {
+                    log::info!(
+                        "NIP-44 encryption enabled. Server pubkey: {}",
+                        keys.public_key_hex()
+                    );
+                    Some(keys)
+                }
+                Err(e) => {
+                    log::error!("Failed to load server keys for NIP-44: {}", e);
+                    log::error!(
+                        "Set SERVER_PRIVKEY env var, or NIP44_ALLOW_EPHEMERAL=true for development"
+                    );
+                    return Err(env::VarError::NotPresent);
+                }
+            }
+        } else {
+            None
+        };
+
+        // ntfy server URL for Android push notifications
+        let ntfy_server_url = env::var("NTFY_SERVER_URL")
+            .unwrap_or(DEFAULT_NTFY_SERVER_URL.to_string());
+
         Ok(NotePushEnv {
             apns_private_key_path,
             apns_private_key_id,
@@ -69,6 +125,9 @@ impl NotePushEnv {
             api_base_url,
             relay_url,
             nostr_event_cache_max_age,
+            nip44_enabled,
+            server_keys,
+            ntfy_server_url,
         })
     }
 

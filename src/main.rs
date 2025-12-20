@@ -2,14 +2,13 @@
 use hyper_util::rt::TokioIo;
 use std::sync::Arc;
 use tokio::net::TcpListener;
-mod notification_manager;
+use notepush::notification_manager;
 use r2d2_sqlite::SqliteConnectionManager;
 mod notepush_env;
 mod relay_connection;
 use notepush_env::NotePushEnv;
 mod api_request_handler;
 mod nip98_auth;
-mod utils;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -38,13 +37,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             env.apns_environment.clone(),
             env.apns_topic.clone(),
             env.nostr_event_cache_max_age,
+            env.server_keys.clone(),
+            env.ntfy_server_url.clone(),
         )
         .await
         .expect("Failed to create notification manager"),
     );
+    log::info!("ntfy server URL: {}", env.ntfy_server_url);
     let api_handler = Arc::new(api_request_handler::APIHandler::new(
         notification_manager.clone(),
         env.api_base_url.clone(),
+        env.server_keys.clone(),
     ));
 
     loop {

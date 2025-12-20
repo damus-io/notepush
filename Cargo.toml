@@ -23,7 +23,7 @@ a2 = { version = "0.10.0" }
 tokio = { version = "1.38.0", features = ["full"] }
 tungstenite = "0.23.0"
 hyper = { version = "1.4.1", features = ["server"] }
-nostr = "0.32.1"
+nostr = { version = "0.32.1", features = ["nip44"] }
 log = "0.4"
 env_logger = "0.11.3"
 nostr-sdk = "0.32.0"
@@ -34,6 +34,8 @@ base64 = "0.22.1"
 hyper-util = "0.1.6"
 http-body-util = "0.1.2"
 uuid = { version = "1.10.0", features = ["v4"] }
+hex = "0.4"
 thiserror = "1.0.63"
 hyper-tungstenite = "0.14.0"
 futures = "0.3.30"
+reqwest = { version = "0.12", features = ["json"] }

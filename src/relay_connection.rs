@@ -1,4 +1,4 @@
-use crate::notification_manager::NotificationManager;
+use notepush::notification_manager::NotificationManager;
 use futures::sink::SinkExt;
 use futures::StreamExt;
 use hyper::upgrade::Upgraded;
