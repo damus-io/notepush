@@ -12,6 +12,9 @@ const DEFAULT_NOSTR_EVENT_CACHE_MAX_AGE: u64 = 60 * 60; // 1 hour
 // When enabled, notification payloads are encrypted to client device pubkeys
 const DEFAULT_NIP44_ENABLED: bool = false;
 
+// ntfy server URL for Android push notifications
+const DEFAULT_NTFY_SERVER_URL: &str = "https://ntfy.damus.io";
+
 pub struct NotePushEnv {
     // The path to the Apple private key .p8 file
     pub apns_private_key_path: String,
@@ -38,6 +41,8 @@ pub struct NotePushEnv {
     pub nip44_enabled: bool,
     // Server keypair for NIP-44 encryption (required when nip44_enabled is true)
     pub server_keys: Option<ServerKeys>,
+    // ntfy server URL for Android push notifications
+    pub ntfy_server_url: String,
 }
 
 impl NotePushEnv {
@@ -104,6 +109,10 @@ impl NotePushEnv {
             None
         };
 
+        // ntfy server URL for Android push notifications
+        let ntfy_server_url = env::var("NTFY_SERVER_URL")
+            .unwrap_or(DEFAULT_NTFY_SERVER_URL.to_string());
+
         Ok(NotePushEnv {
             apns_private_key_path,
             apns_private_key_id,
@@ -118,6 +127,7 @@ impl NotePushEnv {
             nostr_event_cache_max_age,
             nip44_enabled,
             server_keys,
+            ntfy_server_url,
         })
     }
 

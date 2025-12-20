@@ -2,6 +2,7 @@ use crate::nip98_auth;
 use crate::relay_connection::RelayConnection;
 use notepush::notification_manager::{NotificationManagerError, UserNotificationSettings};
 use notepush::server_keys::ServerKeys;
+use notepush::Platform;
 use http_body_util::Full;
 use hyper::body::Buf;
 use hyper::body::Bytes;
@@ -339,13 +340,23 @@ impl APIHandler {
             });
         }
 
+        // Parse platform from request body (optional, defaults to "ios")
+        // Android clients should send { "platform": "android" }
+        let platform = match req.body_json().ok().and_then(|b| b.get("platform").and_then(|p| p.as_str()).map(String::from)) {
+            Some(p) => Platform::from_str(&p),
+            None => Platform::Ios, // Default to iOS for backwards compatibility
+        };
+
         // Proceed with the main logic after passing all checks
         self.notification_manager
-            .save_user_device_info_if_not_present(pubkey, device_token)
+            .save_user_device_info_if_not_present(pubkey, device_token, platform)
             .await?;
         Ok(APIResponse {
             status: StatusCode::OK,
-            body: json!({ "message": "User info saved successfully" }),
+            body: json!({
+                "message": "User info saved successfully",
+                "platform": platform.as_str()
+            }),
         })
     }
 

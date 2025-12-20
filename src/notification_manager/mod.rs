@@ -28,6 +28,9 @@ use r2d2_sqlite::SqliteConnectionManager;
 use std::fs::File;
 use utils::should_mute_notification_for_mutelist;
 
+use crate::ntfy_client::NtfyClient;
+use crate::Platform;
+
 // MARK: - Error types
 
 /// Errors specific to NotificationManager operations
@@ -63,6 +66,8 @@ pub struct NotificationManager {
     db: Arc<Mutex<r2d2::Pool<SqliteConnectionManager>>>,
     apns_topic: String,
     apns_client: Mutex<Client>,
+    /// ntfy client for Android push notifications
+    ntfy_client: NtfyClient,
     nostr_network_helper: NostrNetworkHelper,
     pub event_saver: EventSaver,
     /// Server keys for NIP-44 encryption (None if encryption disabled)
@@ -182,6 +187,7 @@ impl NotificationManager {
         apns_topic: String,
         cache_max_age: std::time::Duration,
         server_keys: Option<crate::server_keys::ServerKeys>,
+        ntfy_server_url: String,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let connection = db.get()?;
         Self::setup_database(&connection)?;
@@ -195,6 +201,10 @@ impl NotificationManager {
             ClientConfig::new(apns_environment.clone()),
         )?;
 
+        // Create ntfy client for Android push notifications
+        let ntfy_client = NtfyClient::new(ntfy_server_url);
+        log::info!("ntfy client initialized for Android push notifications");
+
         let db = Arc::new(Mutex::new(db));
         let event_saver = EventSaver::new(db.clone());
 
@@ -202,6 +212,7 @@ impl NotificationManager {
             db,
             apns_topic,
             apns_client: Mutex::new(client),
+            ntfy_client,
             nostr_network_helper: NostrNetworkHelper::new(
                 relay_url.clone(),
                 cache_max_age,
@@ -319,6 +330,16 @@ impl NotificationManager {
             "device_pubkey",
             "TEXT",
             None,
+        )?;
+
+        // Platform support for routing to APNs (iOS) or ntfy (Android)
+        // Default to "ios" for backwards compatibility with existing registrations
+        Self::add_column_if_not_exists(
+            db,
+            "user_info",
+            "platform",
+            "TEXT",
+            Some("'ios'"),
         )?;
 
         // Migration related to mute list improvements (https://github.com/damus-io/damus/issues/2118)
@@ -661,9 +682,24 @@ impl NotificationManager {
         pubkey: &PublicKey,
         device_token: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        let platform = self.get_device_platform(pubkey, device_token).await?;
+
+        match platform {
+            Platform::Ios => self.send_apns_notification(event, pubkey, device_token).await,
+            Platform::Android => self.send_ntfy_notification(event, pubkey, device_token).await,
+        }
+    }
+
+    /// Send notification via APNs (iOS/macOS)
+    async fn send_apns_notification(
+        &self,
+        event: &Event,
+        pubkey: &PublicKey,
+        device_token: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let (title, subtitle, body) = self.format_notification_message(event);
 
-        log::debug!("Sending notification to device token: {}", device_token);
+        log::debug!("Sending APNs notification to device token: {}", device_token);
 
         let mut payload = DefaultNotificationBuilder::new()
             .set_title(&title)
@@ -688,10 +724,8 @@ impl NotificationManager {
                     "ciphertext",
                     serde_json::Value::String(ciphertext),
                 );
-                // Metrics: Track encrypted notification count
-                // Use debug level to avoid logging sensitive device tokens in production
                 log::debug!(
-                    "nip44_notification encrypted=true pubkey={}...",
+                    "nip44_notification encrypted=true platform=ios pubkey={}...",
                     &pubkey.to_hex()[..8]
                 );
             }
@@ -702,10 +736,8 @@ impl NotificationManager {
                     "nostr_event",
                     serde_json::Value::String(event_json),
                 );
-                // Metrics: Track plaintext notification count
                 log::debug!(
-                    "nip44_notification encrypted=false device={} pubkey={}",
-                    device_token,
+                    "nip44_notification encrypted=false platform=ios pubkey={}",
                     pubkey.to_hex()
                 );
             }
@@ -716,14 +748,69 @@ impl NotificationManager {
         match apns_client_mutex_guard.send(payload).await {
             Ok(_response) => {}
             Err(e) => log::error!(
-                "Failed to send notification to device token '{}': {}",
-                device_token,
+                "Failed to send APNs notification to device: {}",
                 e
             ),
         }
 
-        // Debug level: device tokens are sensitive and shouldn't appear in production logs
-        log::debug!("Notification sent to device");
+        log::debug!("APNs notification sent");
+        Ok(())
+    }
+
+    /// Send notification via ntfy (Android)
+    async fn send_ntfy_notification(
+        &self,
+        event: &Event,
+        pubkey: &PublicKey,
+        device_token: &str,  // For Android, this is the ntfy topic
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (title, _subtitle, body) = self.format_notification_message(event);
+
+        log::debug!("Sending ntfy notification to topic: {}", device_token);
+
+        // NIP-44 E2E Encryption: encrypt to device pubkey if registered
+        let event_json = event.try_as_json()?;
+        let encrypted = self.maybe_encrypt_payload(pubkey, device_token, &event_json).await;
+
+        // Build JSON payload for ntfy
+        let mut data_payload = serde_json::Map::new();
+
+        match encrypted {
+            Some(ciphertext) => {
+                data_payload.insert("encrypted".to_string(), serde_json::Value::Bool(true));
+                data_payload.insert("ciphertext".to_string(), serde_json::Value::String(ciphertext));
+                log::debug!(
+                    "nip44_notification encrypted=true platform=android pubkey={}...",
+                    &pubkey.to_hex()[..8]
+                );
+            }
+            None => {
+                data_payload.insert("encrypted".to_string(), serde_json::Value::Bool(false));
+                data_payload.insert("nostr_event".to_string(), serde_json::Value::String(event_json));
+                log::debug!(
+                    "nip44_notification encrypted=false platform=android pubkey={}",
+                    pubkey.to_hex()
+                );
+            }
+        }
+
+        // ntfy JSON payload format
+        let ntfy_payload = serde_json::json!({
+            "topic": device_token,
+            "title": title,
+            "message": body,
+            "priority": 4,  // High priority
+            "data": data_payload
+        });
+
+        match self.ntfy_client.send_json(device_token, &ntfy_payload).await {
+            Ok(_response) => {
+                log::debug!("ntfy notification sent");
+            }
+            Err(e) => {
+                log::error!("Failed to send ntfy notification: {}", e);
+            }
+        }
 
         Ok(())
     }
@@ -816,6 +903,7 @@ impl NotificationManager {
         &self,
         pubkey: nostr::PublicKey,
         device_token: &str,
+        platform: Platform,
     ) -> Result<(), Box<dyn std::error::Error>> {
         if self
             .is_pubkey_token_pair_registered(&pubkey, device_token)
@@ -823,30 +911,60 @@ impl NotificationManager {
         {
             return Ok(());
         }
-        self.save_user_device_info(pubkey, device_token).await
+        self.save_user_device_info(pubkey, device_token, platform).await
     }
 
     pub async fn save_user_device_info(
         &self,
         pubkey: nostr::PublicKey,
         device_token: &str,
+        platform: Platform,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let current_time_unix = Timestamp::now();
         let db_mutex_guard = self.db.lock().await;
         // Use UPSERT to preserve existing columns on re-registration.
         // INSERT OR REPLACE would drop device_pubkey, notification settings, etc.
-        // ON CONFLICT only updates added_at; all other columns remain unchanged.
+        // ON CONFLICT updates added_at and platform; other columns remain unchanged.
         db_mutex_guard.get()?.execute(
-            "INSERT INTO user_info (id, pubkey, device_token, added_at) VALUES (?, ?, ?, ?)
-             ON CONFLICT(id) DO UPDATE SET added_at = excluded.added_at",
+            "INSERT INTO user_info (id, pubkey, device_token, added_at, platform) VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET added_at = excluded.added_at, platform = excluded.platform",
             params![
                 format!("{}:{}", pubkey.to_sql_string(), device_token),
                 pubkey.to_sql_string(),
                 device_token,
-                current_time_unix.to_sql_string()
+                current_time_unix.to_sql_string(),
+                platform.as_str()
             ],
         )?;
+        log::debug!(
+            "Registered device for pubkey {}... platform={}",
+            &pubkey.to_hex()[..8],
+            platform.as_str()
+        );
         Ok(())
+    }
+
+    /// Get the platform for a device token
+    async fn get_device_platform(
+        &self,
+        pubkey: &PublicKey,
+        device_token: &str,
+    ) -> Result<Platform, Box<dyn std::error::Error>> {
+        let db_mutex_guard = self.db.lock().await;
+        let connection = db_mutex_guard.get()?;
+        let mut stmt = connection.prepare(
+            "SELECT platform FROM user_info WHERE pubkey = ? AND device_token = ?",
+        )?;
+
+        let platform_str: Option<String> = stmt
+            .query_row([pubkey.to_sql_string(), device_token.to_string()], |row| {
+                row.get(0)
+            })
+            .ok();
+
+        Ok(platform_str
+            .map(|s| Platform::from_str(&s))
+            .unwrap_or(Platform::Ios))
     }
 
     pub async fn remove_user_device_info(

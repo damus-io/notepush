@@ -38,3 +38,4 @@ hex = "0.4"
 thiserror = "1.0.63"
 hyper-tungstenite = "0.14.0"
 futures = "0.3.30"
+reqwest = { version = "0.12", features = ["json"] }
