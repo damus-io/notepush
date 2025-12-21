@@ -5,6 +5,7 @@ pub mod utils;
 
 use std::cmp::{max, min};
 use nostr_event_extensions::{ExtendedEvent, SqlStringConvertible};
+use nostrdb::{Config as NdbConfig, Ndb, Transaction as NdbTransaction};
 
 use a2::{Client, ClientConfig, DefaultNotificationBuilder, NotificationBuilder};
 use nostr::key::PublicKey;
@@ -43,6 +44,7 @@ pub struct NotificationManager {
     apns_client: Mutex<Client>,
     nostr_network_helper: NostrNetworkHelper,
     pub event_saver: EventSaver,
+    pub ndb: Ndb,
 }
 
 #[derive(Clone)]
@@ -157,6 +159,7 @@ impl NotificationManager {
         apns_environment: a2::client::Endpoint,
         apns_topic: String,
         cache_max_age: std::time::Duration,
+        ndb_path: String,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let connection = db.get()?;
         Self::setup_database(&connection)?;
@@ -173,6 +176,11 @@ impl NotificationManager {
         let db = Arc::new(Mutex::new(db));
         let event_saver = EventSaver::new(db.clone());
 
+        // Initialize nostrdb for profile lookups
+        let ndb_config = NdbConfig::new();
+        let ndb = Ndb::new(&ndb_path, &ndb_config)
+            .map_err(|e| format!("Failed to initialize nostrdb: {:?}", e))?;
+
         let manager = NotificationManager {
             db,
             apns_topic,
@@ -184,6 +192,7 @@ impl NotificationManager {
             )
             .await?,
             event_saver,
+            ndb,
         };
 
         Ok(manager)
@@ -642,6 +651,21 @@ impl NotificationManager {
             serde_json::Value::String(event.try_as_json()?),
         );
 
+        // Add author's profile data if available
+        let (name, picture) = self
+            .get_author_profile(&event.pubkey)
+            .unwrap_or_default();
+        if !name.is_empty() {
+            payload
+                .data
+                .insert("name", serde_json::Value::String(name));
+        }
+        if !picture.is_empty() {
+            payload
+                .data
+                .insert("picture", serde_json::Value::String(picture));
+        }
+
         let apns_client_mutex_guard = self.apns_client.lock().await;
 
         match apns_client_mutex_guard.send(payload).await {
@@ -685,6 +709,27 @@ impl NotificationManager {
             _ => ("New activity".to_string(), "".to_string()),
         };
         (title, "".to_string(), body)
+    }
+
+    /// Gets the author's profile (name, picture) from nostrdb
+    fn get_author_profile(&self, pubkey: &PublicKey) -> Option<(String, String)> {
+        let txn = NdbTransaction::new(&self.ndb).ok()?;
+        let pubkey_hex = pubkey.to_hex();
+        let pubkey_bytes: [u8; 32] = hex::decode(&pubkey_hex)
+            .ok()?
+            .try_into()
+            .ok()?;
+        let profile_record = self.ndb.get_profile_by_pubkey(&txn, &pubkey_bytes).ok()?;
+        let profile = profile_record.record().profile()?;
+
+        let name = profile
+            .display_name()
+            .or(profile.name())
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        let picture = profile.picture().map(|s| s.to_string()).unwrap_or_default();
+
+        Some((name, picture))
     }
 
     // MARK: - User device info and settings

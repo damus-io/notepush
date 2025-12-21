@@ -2,6 +2,7 @@ use dotenv::dotenv;
 use std::env;
 
 const DEFAULT_DB_PATH: &str = "./apns_notifications.db";
+const DEFAULT_NDB_PATH: &str = "./nostrdb";
 const DEFAULT_HOST: &str = "0.0.0.0";
 const DEFAULT_PORT: &str = "8000";
 const DEFAULT_RELAY_URL: &str = "wss://relay.damus.io";
@@ -20,6 +21,8 @@ pub struct NotePushEnv {
     pub apns_topic: String,
     // The path to the SQLite database file
     pub db_path: String,
+    // The path to the nostrdb LMDB database directory
+    pub ndb_path: String,
     // The host and port to bind the relay and API to
     pub host: String,
     pub port: String,
@@ -37,6 +40,7 @@ impl NotePushEnv {
         let apns_private_key_id = env::var("APNS_AUTH_PRIVATE_KEY_ID")?;
         let apns_team_id = env::var("APPLE_TEAM_ID")?;
         let db_path = env::var("DB_PATH").unwrap_or(DEFAULT_DB_PATH.to_string());
+        let ndb_path = env::var("NDB_PATH").unwrap_or(DEFAULT_NDB_PATH.to_string());
         let host = env::var("HOST").unwrap_or(DEFAULT_HOST.to_string());
         let port = env::var("PORT").unwrap_or(DEFAULT_PORT.to_string());
         let relay_url = env::var("RELAY_URL").unwrap_or(DEFAULT_RELAY_URL.to_string());
@@ -64,6 +68,7 @@ impl NotePushEnv {
             apns_environment,
             apns_topic,
             db_path,
+            ndb_path,
             host,
             port,
             api_base_url,

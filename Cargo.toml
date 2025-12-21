@@ -37,3 +37,5 @@ uuid = { version = "1.10.0", features = ["v4"] }
 thiserror = "1.0.63"
 hyper-tungstenite = "0.14.0"
 futures = "0.3.30"
+nostrdb = { path = "../nostrdb-rs" }
+hex = "0.4"

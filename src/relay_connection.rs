@@ -103,6 +103,13 @@ impl RelayConnection {
             ClientMessage::Event(event) => {
                 log::info!("Received event with id: {:?}", event.id.to_hex());
                 log::debug!("Event received: {:?}", event);
+
+                // Ingest event into nostrdb for profile lookups
+                let relay_json = format!(r#"["EVENT","notepush",{}]"#, event.as_json());
+                if let Err(e) = self.notification_manager.ndb.process_event(&relay_json) {
+                    log::warn!("Failed to ingest event into nostrdb: {:?}", e);
+                }
+
                 self.notification_manager
                     .event_saver
                     .save_if_needed(&event)
