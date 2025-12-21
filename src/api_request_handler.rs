@@ -108,8 +108,10 @@ impl APIHandler {
         log::info!("New websocket connection.");
 
         let new_notification_manager = self.notification_manager.clone();
+        // Convert HTTP base URL to WebSocket relay URL for NIP-42 validation
+        let relay_url = self.base_url.replace("https://", "wss://").replace("http://", "ws://");
         tokio::spawn(async move {
-            match RelayConnection::run(websocket, new_notification_manager).await {
+            match RelayConnection::run(websocket, new_notification_manager, relay_url).await {
                 Ok(_) => {}
                 Err(e) => {
                     log::error!("Error with websocket connection: {:?}", e);
