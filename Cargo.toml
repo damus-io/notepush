@@ -37,3 +37,9 @@ uuid = { version = "1.10.0", features = ["v4"] }
 thiserror = "1.0.63"
 hyper-tungstenite = "0.14.0"
 futures = "0.3.30"
+# Pinned to specific commit for reproducible builds
+nostrdb = { git = "https://github.com/damus-io/nostrdb-rs", rev = "6956b9f9" }
+hex = "0.4"
+
+[dev-dependencies]
+tempfile = "3"

@@ -5,7 +5,7 @@ use hyper::upgrade::Upgraded;
 use hyper_tungstenite::{HyperWebsocket, WebSocketStream};
 use hyper_util::rt::TokioIo;
 use nostr::util::JsonUtil;
-use nostr::{ClientMessage, RelayMessage};
+use nostr::{ClientMessage, Kind, RelayMessage};
 use serde_json::Value;
 use std::fmt::{self, Debug};
 use std::str::FromStr;
@@ -103,6 +103,17 @@ impl RelayConnection {
             ClientMessage::Event(event) => {
                 log::info!("Received event with id: {:?}", event.id.to_hex());
                 log::debug!("Event received: {:?}", event);
+
+                // Only ingest kind:0 metadata events for profile lookups (avoid unbounded growth)
+                if event.kind == Kind::Metadata {
+                    if let Some(ref ndb) = self.notification_manager.ndb {
+                        let relay_json = format!(r#"["EVENT","notepush",{}]"#, event.as_json());
+                        if let Err(e) = ndb.process_event(&relay_json) {
+                            log::warn!("Failed to ingest profile into nostrdb: {:?}", e);
+                        }
+                    }
+                }
+
                 self.notification_manager
                     .event_saver
                     .save_if_needed(&event)

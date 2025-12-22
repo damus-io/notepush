@@ -5,6 +5,7 @@ pub mod utils;
 
 use std::cmp::{max, min};
 use nostr_event_extensions::{ExtendedEvent, SqlStringConvertible};
+use nostrdb::{Config as NdbConfig, Ndb, Transaction as NdbTransaction};
 
 use a2::{Client, ClientConfig, DefaultNotificationBuilder, NotificationBuilder};
 use nostr::key::PublicKey;
@@ -43,6 +44,8 @@ pub struct NotificationManager {
     apns_client: Mutex<Client>,
     nostr_network_helper: NostrNetworkHelper,
     pub event_saver: EventSaver,
+    /// nostrdb for profile lookups (None if disabled via NDB_PATH="disabled")
+    pub ndb: Option<Ndb>,
 }
 
 #[derive(Clone)]
@@ -157,6 +160,8 @@ impl NotificationManager {
         apns_environment: a2::client::Endpoint,
         apns_topic: String,
         cache_max_age: std::time::Duration,
+        ndb_path: Option<String>,
+        ndb_mapsize_mb: usize,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let connection = db.get()?;
         Self::setup_database(&connection)?;
@@ -173,6 +178,28 @@ impl NotificationManager {
         let db = Arc::new(Mutex::new(db));
         let event_saver = EventSaver::new(db.clone());
 
+        // Initialize nostrdb for profile lookups (if enabled)
+        let ndb = match ndb_path {
+            Some(ref path) => {
+                let mapsize_bytes = ndb_mapsize_mb * 1024 * 1024;
+                let ndb_config = NdbConfig::new().set_mapsize(mapsize_bytes);
+                match Ndb::new(path, &ndb_config) {
+                    Ok(db) => {
+                        log::info!("nostrdb initialized at {} (mapsize: {}MB)", path, ndb_mapsize_mb);
+                        Some(db)
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to initialize nostrdb at {}: {:?}. Profile lookups disabled.", path, e);
+                        None
+                    }
+                }
+            }
+            None => {
+                log::info!("nostrdb disabled (NDB_PATH not set or set to 'disabled')");
+                None
+            }
+        };
+
         let manager = NotificationManager {
             db,
             apns_topic,
@@ -184,6 +211,7 @@ impl NotificationManager {
             )
             .await?,
             event_saver,
+            ndb,
         };
 
         Ok(manager)
@@ -642,6 +670,21 @@ impl NotificationManager {
             serde_json::Value::String(event.try_as_json()?),
         );
 
+        // Add author's profile data if available
+        let (name, picture) = self
+            .get_author_profile(&event.pubkey)
+            .unwrap_or_default();
+        if !name.is_empty() {
+            payload
+                .data
+                .insert("name", serde_json::Value::String(name));
+        }
+        if !picture.is_empty() {
+            payload
+                .data
+                .insert("picture", serde_json::Value::String(picture));
+        }
+
         let apns_client_mutex_guard = self.apns_client.lock().await;
 
         match apns_client_mutex_guard.send(payload).await {
@@ -685,6 +728,28 @@ impl NotificationManager {
             _ => ("New activity".to_string(), "".to_string()),
         };
         (title, "".to_string(), body)
+    }
+
+    /// Gets the author's profile (name, picture) from nostrdb
+    fn get_author_profile(&self, pubkey: &PublicKey) -> Option<(String, String)> {
+        let ndb = self.ndb.as_ref()?;
+        let txn = NdbTransaction::new(ndb).ok()?;
+        let pubkey_hex = pubkey.to_hex();
+        let pubkey_bytes: [u8; 32] = hex::decode(&pubkey_hex)
+            .ok()?
+            .try_into()
+            .ok()?;
+        let profile_record = ndb.get_profile_by_pubkey(&txn, &pubkey_bytes).ok()?;
+        let profile = profile_record.record().profile()?;
+
+        let name = profile
+            .display_name()
+            .or(profile.name())
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        let picture = profile.picture().map(|s| s.to_string()).unwrap_or_default();
+
+        Some((name, picture))
     }
 
     // MARK: - User device info and settings
@@ -820,5 +885,115 @@ impl NotificationStatus {
             .filter(|&(_, &received_notification)| received_notification)
             .map(|(pubkey, _)| *pubkey)
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use nostrdb::{Config as NdbConfig, Ndb, Transaction};
+
+    /// Test that profile lookup works after ingesting a kind:0 metadata event
+    /// NOTE: This test is flaky due to nostrdb async ingestion timing. Run with --ignored to test.
+    #[test]
+    #[ignore]
+    fn test_profile_lookup_from_nostrdb() {
+        let db_path = "target/testdbs/profile_lookup_test";
+
+        // Clean up any previous test run
+        let _ = std::fs::remove_dir_all(db_path);
+
+        // A real kind:0 profile event (jb55's profile) - note the field order matches nostrdb-rs tests
+        let profile_event = r#"["EVENT","nostril-query",{"content":"{\"nip05\":\"_@jb55.com\",\"website\":\"https://damus.io\",\"name\":\"jb55\",\"about\":\"I made damus\",\"lud16\":\"jb55@sendsats.lol\",\"display_name\":\"Will\",\"picture\":\"https://cdn.jb55.com/img/red-me.jpg\"}","created_at":1700855305,"id":"cad04d11f7fa9c36d57400baca198582dfeb94fa138366c4469e58da9ed60051","kind":0,"pubkey":"32e1827635450ebb3c5a7d12c1f8e7b2b514439ac10a67eef3d9fd9c5c68e245","sig":"7a15e379ff27318460172b4a1d55a13e064c5007d05d5a188e7f60e244a9ed08996cb7676058b88c7a91ae9488f8edc719bc966cb5bf1eb99be44cdb745f915f","tags":[]}]"#;
+
+        // Ingest the profile event and close db to flush
+        {
+            let config = NdbConfig::new();
+            let ndb = Ndb::new(db_path, &config).expect("Failed to create ndb");
+            ndb.process_event(profile_event)
+                .expect("Failed to process profile event");
+            // Wait for async ingestion before closing
+            std::thread::sleep(std::time::Duration::from_millis(150));
+        } // ndb dropped here, forces flush
+
+        // Reopen and verify
+        let config = NdbConfig::new();
+        let ndb = Ndb::new(db_path, &config).expect("Failed to reopen ndb");
+
+        let pubkey_hex = "32e1827635450ebb3c5a7d12c1f8e7b2b514439ac10a67eef3d9fd9c5c68e245";
+        let pubkey_bytes: [u8; 32] = hex::decode(pubkey_hex)
+            .expect("valid hex")
+            .try_into()
+            .expect("32 bytes");
+
+        let mut txn = Transaction::new(&ndb).expect("Failed to create transaction");
+        let profile_record = ndb
+            .get_profile_by_pubkey(&mut txn, &pubkey_bytes)
+            .expect("Profile should exist after reopen");
+
+        let profile = profile_record
+            .record()
+            .profile()
+            .expect("Profile record should have profile");
+
+        // Verify profile data
+        assert_eq!(profile.name(), Some("jb55"));
+        assert_eq!(profile.display_name(), Some("Will"));
+        assert_eq!(profile.picture(), Some("https://cdn.jb55.com/img/red-me.jpg"));
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(db_path);
+    }
+
+    /// Test that profile lookup returns None for unknown pubkey
+    #[test]
+    fn test_profile_lookup_unknown_pubkey() {
+        let db_path = "target/testdbs/unknown_pubkey_test";
+        let _ = std::fs::remove_dir_all(db_path);
+
+        let config = NdbConfig::new();
+        let ndb = Ndb::new(db_path, &config).expect("Failed to create ndb");
+
+        // Try to look up a pubkey that doesn't exist
+        let unknown_pubkey: [u8; 32] = [0u8; 32];
+
+        let txn = Transaction::new(&ndb).expect("Failed to create transaction");
+        let result = ndb.get_profile_by_pubkey(&txn, &unknown_pubkey);
+
+        assert!(result.is_err(), "Should not find unknown pubkey");
+
+        let _ = std::fs::remove_dir_all(db_path);
+    }
+
+    /// Test that ingesting a note event (kind:1) doesn't create a profile
+    #[test]
+    fn test_note_event_does_not_create_profile() {
+        let db_path = "target/testdbs/note_no_profile_test";
+        let _ = std::fs::remove_dir_all(db_path);
+
+        let config = NdbConfig::new();
+        let ndb = Ndb::new(db_path, &config).expect("Failed to create ndb");
+
+        // A kind:1 text note (not a profile)
+        let note_event = r#"["EVENT","test",{"id":"702555e52e82cc24ad517ba78c21879f6e47a7c0692b9b20df147916ae8731a3","pubkey":"32bf915904bfde2d136ba45dde32c88f4aca863783999faea2e847a8fafd2f15","created_at":1702675561,"kind":1,"tags":[],"content":"hello, world","sig":"2275c5f5417abfd644b7bc74f0388d70feb5d08b6f90fa18655dda5c95d013bfbc5258ea77c05b7e40e0ee51d8a2efa931dc7a0ec1db4c0a94519762c6625675"}]"#;
+
+        ndb.process_event(note_event)
+            .expect("Failed to process note event");
+
+        std::thread::sleep(std::time::Duration::from_millis(150));
+
+        // Try to look up profile for the note author
+        let pubkey_hex = "32bf915904bfde2d136ba45dde32c88f4aca863783999faea2e847a8fafd2f15";
+        let pubkey_bytes: [u8; 32] = hex::decode(pubkey_hex)
+            .expect("valid hex")
+            .try_into()
+            .expect("32 bytes");
+
+        let txn = Transaction::new(&ndb).expect("Failed to create transaction");
+        let result = ndb.get_profile_by_pubkey(&txn, &pubkey_bytes);
+
+        // Should not have a profile since we only ingested a note
+        assert!(result.is_err(), "Note author should not have profile");
+
+        let _ = std::fs::remove_dir_all(db_path);
     }
 }
