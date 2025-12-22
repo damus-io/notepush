@@ -161,6 +161,7 @@ impl NotificationManager {
         apns_topic: String,
         cache_max_age: std::time::Duration,
         ndb_path: Option<String>,
+        ndb_mapsize_mb: usize,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let connection = db.get()?;
         Self::setup_database(&connection)?;
@@ -180,10 +181,11 @@ impl NotificationManager {
         // Initialize nostrdb for profile lookups (if enabled)
         let ndb = match ndb_path {
             Some(ref path) => {
-                let ndb_config = NdbConfig::new();
+                let mapsize_bytes = ndb_mapsize_mb * 1024 * 1024;
+                let ndb_config = NdbConfig::new().set_mapsize(mapsize_bytes);
                 match Ndb::new(path, &ndb_config) {
                     Ok(db) => {
-                        log::info!("nostrdb initialized at {}", path);
+                        log::info!("nostrdb initialized at {} (mapsize: {}MB)", path, ndb_mapsize_mb);
                         Some(db)
                     }
                     Err(e) => {

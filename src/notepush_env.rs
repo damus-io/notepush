@@ -3,6 +3,7 @@ use std::env;
 
 const DEFAULT_DB_PATH: &str = "./apns_notifications.db";
 const DEFAULT_NDB_PATH: &str = "./nostrdb";
+const DEFAULT_NDB_MAPSIZE_MB: usize = 64; // 64MB limit for profile storage
 const DEFAULT_HOST: &str = "0.0.0.0";
 const DEFAULT_PORT: &str = "8000";
 const DEFAULT_RELAY_URL: &str = "wss://relay.damus.io";
@@ -23,6 +24,8 @@ pub struct NotePushEnv {
     pub db_path: String,
     // The path to the nostrdb LMDB database directory (None = disabled)
     pub ndb_path: Option<String>,
+    // LMDB mapsize in MB (limits storage growth)
+    pub ndb_mapsize_mb: usize,
     // The host and port to bind the relay and API to
     pub host: String,
     pub port: String,
@@ -46,6 +49,11 @@ impl NotePushEnv {
             Ok(path) => Some(path.to_string()),
             Err(_) => Some(DEFAULT_NDB_PATH.to_string()),
         };
+        // NDB_MAPSIZE_MB: limits LMDB storage (default 64MB)
+        let ndb_mapsize_mb = env::var("NDB_MAPSIZE_MB")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(DEFAULT_NDB_MAPSIZE_MB);
         let host = env::var("HOST").unwrap_or(DEFAULT_HOST.to_string());
         let port = env::var("PORT").unwrap_or(DEFAULT_PORT.to_string());
         let relay_url = env::var("RELAY_URL").unwrap_or(DEFAULT_RELAY_URL.to_string());
@@ -74,6 +82,7 @@ impl NotePushEnv {
             apns_topic,
             db_path,
             ndb_path,
+            ndb_mapsize_mb,
             host,
             port,
             api_base_url,
