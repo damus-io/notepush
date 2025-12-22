@@ -44,7 +44,8 @@ pub struct NotificationManager {
     apns_client: Mutex<Client>,
     nostr_network_helper: NostrNetworkHelper,
     pub event_saver: EventSaver,
-    pub ndb: Ndb,
+    /// nostrdb for profile lookups (None if disabled via NDB_PATH="disabled")
+    pub ndb: Option<Ndb>,
 }
 
 #[derive(Clone)]
@@ -159,7 +160,7 @@ impl NotificationManager {
         apns_environment: a2::client::Endpoint,
         apns_topic: String,
         cache_max_age: std::time::Duration,
-        ndb_path: String,
+        ndb_path: Option<String>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let connection = db.get()?;
         Self::setup_database(&connection)?;
@@ -176,10 +177,26 @@ impl NotificationManager {
         let db = Arc::new(Mutex::new(db));
         let event_saver = EventSaver::new(db.clone());
 
-        // Initialize nostrdb for profile lookups
-        let ndb_config = NdbConfig::new();
-        let ndb = Ndb::new(&ndb_path, &ndb_config)
-            .map_err(|e| format!("Failed to initialize nostrdb: {:?}", e))?;
+        // Initialize nostrdb for profile lookups (if enabled)
+        let ndb = match ndb_path {
+            Some(ref path) => {
+                let ndb_config = NdbConfig::new();
+                match Ndb::new(path, &ndb_config) {
+                    Ok(db) => {
+                        log::info!("nostrdb initialized at {}", path);
+                        Some(db)
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to initialize nostrdb at {}: {:?}. Profile lookups disabled.", path, e);
+                        None
+                    }
+                }
+            }
+            None => {
+                log::info!("nostrdb disabled (NDB_PATH not set or set to 'disabled')");
+                None
+            }
+        };
 
         let manager = NotificationManager {
             db,
@@ -713,13 +730,14 @@ impl NotificationManager {
 
     /// Gets the author's profile (name, picture) from nostrdb
     fn get_author_profile(&self, pubkey: &PublicKey) -> Option<(String, String)> {
-        let txn = NdbTransaction::new(&self.ndb).ok()?;
+        let ndb = self.ndb.as_ref()?;
+        let txn = NdbTransaction::new(ndb).ok()?;
         let pubkey_hex = pubkey.to_hex();
         let pubkey_bytes: [u8; 32] = hex::decode(&pubkey_hex)
             .ok()?
             .try_into()
             .ok()?;
-        let profile_record = self.ndb.get_profile_by_pubkey(&txn, &pubkey_bytes).ok()?;
+        let profile_record = ndb.get_profile_by_pubkey(&txn, &pubkey_bytes).ok()?;
         let profile = profile_record.record().profile()?;
 
         let name = profile

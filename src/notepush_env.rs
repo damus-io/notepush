@@ -21,8 +21,8 @@ pub struct NotePushEnv {
     pub apns_topic: String,
     // The path to the SQLite database file
     pub db_path: String,
-    // The path to the nostrdb LMDB database directory
-    pub ndb_path: String,
+    // The path to the nostrdb LMDB database directory (None = disabled)
+    pub ndb_path: Option<String>,
     // The host and port to bind the relay and API to
     pub host: String,
     pub port: String,
@@ -40,7 +40,12 @@ impl NotePushEnv {
         let apns_private_key_id = env::var("APNS_AUTH_PRIVATE_KEY_ID")?;
         let apns_team_id = env::var("APPLE_TEAM_ID")?;
         let db_path = env::var("DB_PATH").unwrap_or(DEFAULT_DB_PATH.to_string());
-        let ndb_path = env::var("NDB_PATH").unwrap_or(DEFAULT_NDB_PATH.to_string());
+        // NDB_PATH: set to empty string or "disabled" to disable nostrdb
+        let ndb_path = match env::var("NDB_PATH").as_deref() {
+            Ok("") | Ok("disabled") => None,
+            Ok(path) => Some(path.to_string()),
+            Err(_) => Some(DEFAULT_NDB_PATH.to_string()),
+        };
         let host = env::var("HOST").unwrap_or(DEFAULT_HOST.to_string());
         let port = env::var("PORT").unwrap_or(DEFAULT_PORT.to_string());
         let relay_url = env::var("RELAY_URL").unwrap_or(DEFAULT_RELAY_URL.to_string());
